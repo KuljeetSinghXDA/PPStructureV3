@@ -8,3 +8,10 @@ services:
     command: ["hub", "serving", "start", "-m", "ocr_system", "-p", "8868"]
     environment:
       - PYTHONUNBUFFERED=1
+    networks:
+      - ai-automation-shared
+
+networks:
+  ai-automation-shared:
+    external: true
+    name: ai-automation-shared
