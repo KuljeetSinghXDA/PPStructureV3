@@ -1,16 +1,25 @@
 FROM arm64v8/ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
-    gcc g++ make cmake git python3-dev python3-pip swig wget patchelf libopencv-dev \
+    gcc g++ make cmake git python3-full python3-dev swig wget patchelf libopencv-dev \
     libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev gfortran libpng-dev libfreetype6-dev libjpeg-dev zlib1g-dev \
+    libnss-systemd \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --upgrade pip --break-system-packages && \
-    python3 -m pip install --break-system-packages protobuf==3.20.3
+# Create virtual environment for pip isolation
+ENV PYTHON_VENV_PATH=/opt/venv
+RUN python3 -m venv ${PYTHON_VENV_PATH}
+ENV PATH=${PYTHON_VENV_PATH}/bin:$PATH
+
+# Upgrade pip in venv
+RUN pip install --upgrade pip setuptools wheel
+
+# Install protobuf prerequisite
+RUN pip install protobuf==3.20.3
 
 RUN git clone https://github.com/PaddlePaddle/Paddle.git /Paddle && cd /Paddle && git checkout v3.2.0
 
-RUN cd /Paddle && python3 -m pip install --break-system-packages -r python/requirements.txt
+RUN cd /Paddle && pip install -r python/requirements.txt
 
 RUN mkdir /Paddle/build && cd /Paddle/build && cmake .. \
     -DPY_VERSION=3.12 \
@@ -27,11 +36,11 @@ RUN mkdir /Paddle/build && cd /Paddle/build && cmake .. \
     -DWITH_MKLDNN=OFF \
     -DWITH_AVX=OFF \
     -DWITH_XBYAK=OFF \
-    && make TARGET=ARMV8 -j4 && python3 -m pip install --break-system-packages python/dist/*.whl
+    && make TARGET=ARMV8 -j4 && python3 -m pip install python/dist/*.whl
 
 RUN git clone https://github.com/PaddlePaddle/PaddleOCR.git /PaddleOCR && cd /PaddleOCR && git checkout release/3.2
 
-RUN cd /PaddleOCR && python3 -m pip install --break-system-packages -r requirements.txt && python3 -m pip install --break-system-packages paddleocr==3.2.0 paddlehub==2.4.0
+RUN cd /PaddleOCR && pip install -r requirements.txt && pip install paddleocr==3.2.0 paddlehub==2.4.0
 
 RUN mkdir -p /PaddleOCR/inference
 
