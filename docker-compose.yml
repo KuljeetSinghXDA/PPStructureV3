@@ -1,0 +1,10 @@
+services:
+  paddleocr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: paddleocr
+    restart: always
+    command: ["hub", "serving", "start", "-m", "ocr_system", "-p", "8868"]
+    environment:
+      - PYTHONUNBUFFERED=1
