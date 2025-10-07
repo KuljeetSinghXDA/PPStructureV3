@@ -1,4 +1,4 @@
-FROM arm64v8/ubuntu:24.04-slim
+FROM arm64v8/ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ make cmake git python3-full python3-dev swig wget patchelf libopencv-dev \
