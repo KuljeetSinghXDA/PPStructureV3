@@ -1,10 +1,13 @@
-FROM arm64v8/ubuntu:24.04
+FROM arm64v8/ubuntu:24.04-slim
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ make cmake git python3-full python3-dev swig wget patchelf libopencv-dev \
     libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev gfortran libpng-dev libfreetype6-dev libjpeg-dev zlib1g-dev \
     libnss-systemd \
     && rm -rf /var/lib/apt/lists/*
+
+# Overwrite /etc/resolv.conf to ensure DNS stability post-apt (suppresses symlink conflicts)
+RUN echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
 # Create virtual environment for pip isolation
 ENV PYTHON_VENV_PATH=/opt/venv
@@ -36,7 +39,7 @@ RUN mkdir /Paddle/build && cd /Paddle/build && cmake .. \
     -DWITH_MKLDNN=OFF \
     -DWITH_AVX=OFF \
     -DWITH_XBYAK=OFF \
-    && make TARGET=ARMV8 -j4 && python3 -m pip install python/dist/*.whl
+    && make TARGET=ARMV8 -j4 && ${PYTHON_VENV_PATH}/bin/python -m pip install python/dist/*.whl
 
 RUN git clone https://github.com/PaddlePaddle/PaddleOCR.git /PaddleOCR && cd /PaddleOCR && git checkout release/3.2
 
