@@ -3,11 +3,7 @@ FROM arm64v8/ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ make cmake git python3-full python3-dev swig wget patchelf libopencv-dev \
     libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev gfortran libpng-dev libfreetype6-dev libjpeg-dev zlib1g-dev \
-    libnss-systemd \
     && rm -rf /var/lib/apt/lists/*
-
-# Overwrite /etc/resolv.conf to ensure DNS stability post-apt (suppresses symlink conflicts)
-RUN echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
 # Create virtual environment for pip isolation
 ENV PYTHON_VENV_PATH=/opt/venv
