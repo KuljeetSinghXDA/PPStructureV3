@@ -5,6 +5,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev gfortran libpng-dev libfreetype6-dev libjpeg-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Create 8GB swap for compilation (Ampere A1 low RAM)
+RUN dd if=/dev/zero of=/swapfile bs=1M count=8192 && \
+    chmod 600 /swapfile && \
+    mkswap /swapfile && \
+    swapon /swapfile
+
 # Create virtual environment for pip isolation
 ENV PYTHON_VENV_PATH=/opt/venv
 RUN python3 -m venv ${PYTHON_VENV_PATH}
@@ -35,7 +41,8 @@ RUN mkdir /Paddle/build && cd /Paddle/build && cmake .. \
     -DWITH_MKLDNN=OFF \
     -DWITH_AVX=OFF \
     -DWITH_XBYAK=OFF \
-    && make TARGET=ARMV8 -j4 && ${PYTHON_VENV_PATH}/bin/python -m pip install python/dist/*.whl
+    -DCMAKE_CXX_FLAGS="-Wno-error=pessimizing-move" \
+    && make TARGET=ARMV8 -j2 && ${PYTHON_VENV_PATH}/bin/python -m pip install python/dist/*.whl
 
 RUN git clone https://github.com/PaddlePaddle/PaddleOCR.git /PaddleOCR && cd /PaddleOCR && git checkout release/3.2
 
