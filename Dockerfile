@@ -6,25 +6,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss-systemd \
     && rm -rf /var/lib/apt/lists/*
 
-# Create virtual environment for pip isolation
+# Create virtual environment
 ENV PYTHON_VENV_PATH=/opt/venv
 RUN python3 -m venv ${PYTHON_VENV_PATH}
 ENV PATH=${PYTHON_VENV_PATH}/bin:$PATH
 
-# Upgrade pip in venv
+# Upgrade pip and install protobuf (pinned for compatibility)
 RUN pip install --upgrade pip setuptools wheel
+RUN pip install protobuf==3.20.3
 
-# Clone Paddle with all submodules (CRITICAL FIX)
+# Clone Paddle with all submodules
 RUN git clone --recurse-submodules https://github.com/PaddlePaddle/Paddle.git /Paddle && \
     cd /Paddle && \
     git checkout v3.2.0 && \
     git submodule sync --recursive && \
     git submodule update --init --recursive
 
-# Install Python requirements for build
+# Safely disable -Werror to avoid ARM64 build failures from warnings
+RUN cd /Paddle && sed -i 's/-Werror=/-W/g' cmake/flags.cmake
+
+# Install build-time Python dependencies
 RUN cd /Paddle && pip install -r python/requirements.txt
 
-# Build Paddle from source (ARM64, CPU-only)
+# Build Paddle (ARM64 CPU-only)
 RUN mkdir -p /Paddle/build && cd /Paddle/build && \
     cmake .. \
     -DPY_VERSION=3.12 \
@@ -58,7 +62,7 @@ RUN cd /PaddleOCR && pip install -r requirements.txt && pip install paddleocr==3
 # Download inference models
 RUN mkdir -p /PaddleOCR/inference
 
-# PP-OCRv5 detection model
+# PP-OCRv5 detection
 RUN wget https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv5_server_det_infer.tar -O /PaddleOCR/inference/PP-OCRv5_server_det_infer.tar && \
     tar -xf /PaddleOCR/inference/PP-OCRv5_server_det_infer.tar -C /PaddleOCR/inference && \
     rm /PaddleOCR/inference/PP-OCRv5_server_det_infer.tar
@@ -68,12 +72,12 @@ RUN wget https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_m
     tar -xf /PaddleOCR/inference/PP-LCNet_x1_0_textline_ori_infer.tar -C /PaddleOCR/inference && \
     rm /PaddleOCR/inference/PP-LCNet_x1_0_textline_ori_infer.tar
 
-# PP-OCRv5 recognition model
+# PP-OCRv5 recognition
 RUN wget https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv5_server_rec_infer.tar -O /PaddleOCR/inference/PP-OCRv5_server_rec_infer.tar && \
     tar -xf /PaddleOCR/inference/PP-OCRv5_server_rec_infer.tar -C /PaddleOCR/inference && \
     rm /PaddleOCR/inference/PP-OCRv5_server_rec_infer.tar
 
-# Update model paths
+# Update model paths in params.py
 RUN sed -i 's|det_model_dir = .*|det_model_dir = "./inference/PP-OCRv5_server_det_infer/"|g' /PaddleOCR/deploy/hubserving/ocr_system/params.py && \
     sed -i 's|cls_model_dir = .*|cls_model_dir = "./inference/PP-LCNet_x1_0_textline_ori_infer/"|g' /PaddleOCR/deploy/hubserving/ocr_system/params.py && \
     sed -i 's|rec_model_dir = .*|rec_model_dir = "./inference/PP-OCRv5_server_rec_infer/"|g' /PaddleOCR/deploy/hubserving/ocr_system/params.py
