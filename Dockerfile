@@ -1,6 +1,6 @@
 FROM arm64v8/ubuntu:24.04
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ make cmake git python3-full python3-dev swig wget patchelf libopencv-dev \
     libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev gfortran libpng-dev libfreetype6-dev libjpeg-dev zlib1g-dev \
     libnss-systemd \
