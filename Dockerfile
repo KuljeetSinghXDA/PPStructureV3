@@ -4,9 +4,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    LANG=C.UTF-8 \
-    OMP_NUM_THREADS=1 \
-    OPENBLAS_NUM_THREADS=1
+    LANG=C.UTF-8
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 libglib2.0-0 libgl1 ca-certificates curl && \
@@ -24,9 +22,6 @@ RUN python -m pip install --no-cache-dir -r requirements.txt
 
 # App code
 COPY app ./app
-
-# Optional: switch model source to BOS if HF is slow
-ENV PADDLE_PDX_MODEL_SOURCE=BOS
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD curl -fsS http://127.0.0.1:8000/healthz || exit 1
