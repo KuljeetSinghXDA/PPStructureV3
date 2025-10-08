@@ -21,7 +21,6 @@ services:
 networks:
   ai-automation-shared:
     external: true
-    name: ai-automation-shared
 
 volumes:
   ocr-cache-paddlex: {}
