@@ -19,8 +19,8 @@ RUN pip install protobuf==3.20.3
 
 RUN git clone https://github.com/PaddlePaddle/Paddle.git /Paddle && cd /Paddle && git checkout v3.2.0
 
-# Disable -Werror to tolerate warnings during build
-RUN cd /Paddle && sed -i '/-Werror/d' cmake/flags.cmake
+# Disable -Werror selectively to avoid breaking CMake syntax
+RUN cd /Paddle && sed -i 's/ -Werror[^ ]*//g' cmake/flags.cmake
 
 RUN cd /Paddle && pip install -r python/requirements.txt
 
