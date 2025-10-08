@@ -5,7 +5,8 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
-    OMP_NUM_THREADS=4
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 libglib2.0-0 libgl1 ca-certificates curl && \
