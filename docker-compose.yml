@@ -4,6 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     image: local/paddleocr-ppocrv5:latest
+    env_file:
+      - .env
     expose:
       - "8000"
     volumes:
