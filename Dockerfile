@@ -14,21 +14,19 @@ ENV PATH=${PYTHON_VENV_PATH}/bin:$PATH
 # Upgrade pip in venv
 RUN pip install --upgrade pip setuptools wheel
 
-# Install protobuf prerequisite
-RUN pip install protobuf==3.20.3
+# Clone Paddle with all submodules (CRITICAL FIX)
+RUN git clone --recurse-submodules https://github.com/PaddlePaddle/Paddle.git /Paddle && \
+    cd /Paddle && \
+    git checkout v3.2.0 && \
+    git submodule sync --recursive && \
+    git submodule update --init --recursive
 
-RUN git clone https://github.com/PaddlePaddle/Paddle.git /Paddle && cd /Paddle && git checkout v3.2.0
-
-# Disable -Werror selectively to avoid breaking CMake syntax
-RUN cd /Paddle && sed -i 's/ -Werror[^ ]*//g' cmake/flags.cmake
-
+# Install Python requirements for build
 RUN cd /Paddle && pip install -r python/requirements.txt
 
-# Set Python version and build parallelism
-ARG PYVER=3.12
-ENV CMAKE_BUILD_PARALLEL_LEVEL=2
-
-RUN mkdir /Paddle/build && cd /Paddle/build && cmake .. \
+# Build Paddle from source (ARM64, CPU-only)
+RUN mkdir -p /Paddle/build && cd /Paddle/build && \
+    cmake .. \
     -DPY_VERSION=3.12 \
     -DWITH_GPU=OFF \
     -DWITH_CUDA=OFF \
@@ -44,31 +42,38 @@ RUN mkdir /Paddle/build && cd /Paddle/build && cmake .. \
     -DWITH_AVX=OFF \
     -DWITH_XBYAK=OFF \
     -DPYTHON_EXECUTABLE=/opt/venv/bin/python \
-    -DPYTHON_INCLUDE_DIR=/opt/venv/include/python${PYVER} \
-    -DPYTHON_LIBRARY=/usr/lib/aarch64-linux-gnu/libpython${PYVER}.so && \
+    -DPYTHON_INCLUDE_DIR=/opt/venv/include/python3.12 \
+    -DPYTHON_LIBRARY=/usr/lib/aarch64-linux-gnu/libpython3.12.so && \
     ulimit -n 8192 && \
     make TARGET=ARMV8 -j2 && \
-    /opt/venv/bin/pip install python/dist/*.whl
+    pip install python/dist/*.whl
 
-RUN git clone https://github.com/PaddlePaddle/PaddleOCR.git /PaddleOCR && cd /PaddleOCR && git checkout release/3.2
+# Install PaddleOCR
+RUN git clone https://github.com/PaddlePaddle/PaddleOCR.git /PaddleOCR && \
+    cd /PaddleOCR && \
+    git checkout release/3.2
 
 RUN cd /PaddleOCR && pip install -r requirements.txt && pip install paddleocr==3.2.0 paddlehub==2.4.0
 
+# Download inference models
 RUN mkdir -p /PaddleOCR/inference
 
-# Download PP-OCRv5 detection model (server version for high accuracy)
+# PP-OCRv5 detection model
 RUN wget https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv5_server_det_infer.tar -O /PaddleOCR/inference/PP-OCRv5_server_det_infer.tar && \
-    tar -xf /PaddleOCR/inference/PP-OCRv5_server_det_infer.tar -C /PaddleOCR/inference && rm /PaddleOCR/inference/PP-OCRv5_server_det_infer.tar
+    tar -xf /PaddleOCR/inference/PP-OCRv5_server_det_infer.tar -C /PaddleOCR/inference && \
+    rm /PaddleOCR/inference/PP-OCRv5_server_det_infer.tar
 
-# Download latest classification model (PP-LCNet_x1_0_textline_ori for 99.42% accuracy)
+# Classification model
 RUN wget https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-LCNet_x1_0_textline_ori_infer.tar -O /PaddleOCR/inference/PP-LCNet_x1_0_textline_ori_infer.tar && \
-    tar -xf /PaddleOCR/inference/PP-LCNet_x1_0_textline_ori_infer.tar -C /PaddleOCR/inference && rm /PaddleOCR/inference/PP-LCNet_x1_0_textline_ori_infer.tar
+    tar -xf /PaddleOCR/inference/PP-LCNet_x1_0_textline_ori_infer.tar -C /PaddleOCR/inference && \
+    rm /PaddleOCR/inference/PP-LCNet_x1_0_textline_ori_infer.tar
 
-# Download PP-OCRv5 recognition model (server version for high accuracy)
+# PP-OCRv5 recognition model
 RUN wget https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv5_server_rec_infer.tar -O /PaddleOCR/inference/PP-OCRv5_server_rec_infer.tar && \
-    tar -xf /PaddleOCR/inference/PP-OCRv5_server_rec_infer.tar -C /PaddleOCR/inference && rm /PaddleOCR/inference/PP-OCRv5_server_rec_infer.tar
+    tar -xf /PaddleOCR/inference/PP-OCRv5_server_rec_infer.tar -C /PaddleOCR/inference && \
+    rm /PaddleOCR/inference/PP-OCRv5_server_rec_infer.tar
 
-# Update params.py to point to the latest models
+# Update model paths
 RUN sed -i 's|det_model_dir = .*|det_model_dir = "./inference/PP-OCRv5_server_det_infer/"|g' /PaddleOCR/deploy/hubserving/ocr_system/params.py && \
     sed -i 's|cls_model_dir = .*|cls_model_dir = "./inference/PP-LCNet_x1_0_textline_ori_infer/"|g' /PaddleOCR/deploy/hubserving/ocr_system/params.py && \
     sed -i 's|rec_model_dir = .*|rec_model_dir = "./inference/PP-OCRv5_server_rec_infer/"|g' /PaddleOCR/deploy/hubserving/ocr_system/params.py
