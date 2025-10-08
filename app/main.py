@@ -13,14 +13,13 @@ def _cpu_threads():
     cpus = multiprocessing.cpu_count()
     return max(2, min(8, cpus))
 
-# Environment (set in Dokploy UI)
+# Environment (from .env via Compose env_file)
 OCR_LANG = os.getenv("OCR_LANG", "en")
 OCR_VERSION = os.getenv("OCR_VERSION", "PP-OCRv5")
 CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
 TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL", "PP-OCRv5_server_det")
 TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL", "PP-OCRv5_server_rec")
 
-# Resolve model folders where official models are cached by PaddleX/PaddleOCR
 OFFICIAL_DIR = Path("/root/.paddlex/official_models")
 DET_DIR = OFFICIAL_DIR / TEXT_DET_MODEL
 REC_DIR = OFFICIAL_DIR / TEXT_REC_MODEL
@@ -29,9 +28,6 @@ app = FastAPI()
 
 @app.on_event("startup")
 def load_models():
-    # Strategy:
-    # - Always pass model names so PaddleOCR will auto-download if folders are missing.
-    # - If folders exist, also pass det_model_dir/rec_model_dir to hard-bind to server-grade models.
     kwargs = dict(
         lang=OCR_LANG,
         ocr_version=OCR_VERSION,
