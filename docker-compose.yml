@@ -1,17 +1,30 @@
+version: "3.9"
+
 services:
   paddleocr:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: paddleocr
-    restart: always
-    command: ["hub", "serving", "start", "-m", "ocr_system", "-p", "8868"]
-    environment:
-      - PYTHONUNBUFFERED=1
+    image: local/paddleocr-ppocrv5:latest
+    expose:
+      - "8000"
+    volumes:
+      - ocr-cache-paddlex:/root/.paddlex
+      - ocr-cache-user:/root/.cache
     networks:
       - ai-automation-shared
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
 
 networks:
   ai-automation-shared:
     external: true
     name: ai-automation-shared
+
+volumes:
+  ocr-cache-paddlex: {}
+  ocr-cache-user: {}
