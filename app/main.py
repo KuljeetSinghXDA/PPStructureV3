@@ -22,9 +22,9 @@ CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
 TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL") or "PP-OCRv5_server_det"
 TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL") or "PP-OCRv5_server_rec"
 
-# Valid PaddleX-style config: must include pipeline_name and SubModules
+# Valid PaddleX-style config for the OCR pipeline
 PDX_CONFIG = {
-    "pipeline_name": "GeneralOCR",
+    "pipeline_name": "OCR",
     "SubModules": {
         "TextDetection": {
             "model_name": TEXT_DET_MODEL,
@@ -50,7 +50,7 @@ def load_models():
         device="cpu",
         enable_hpi=False,
         cpu_threads=CPU_THREADS,
-        paddlex_config=PDX_CONFIG,  # overrides language-based defaults
+        paddlex_config=PDX_CONFIG,
     )
     print(f"Loaded models: det={TEXT_DET_MODEL}, rec={TEXT_REC_MODEL}, lang={OCR_LANG}, version={OCR_VERSION}")
 
@@ -79,7 +79,7 @@ async def ocr_endpoint(files: List[UploadFile] = File(...)):
             results.append({
                 "filename": f.filename,
                 "texts": res.json.get("rec_texts", []),
-                "scores": [float(s) for s in res.json.get("rec_scores", [])],
+                "scores": [float(s) for s in preds[0].json.get("rec_scores", [])] if preds else [],
                 "boxes": res.json.get("rec_boxes", []),
             })
     return JSONResponse({"results": results})
