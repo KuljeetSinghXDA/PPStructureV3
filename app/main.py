@@ -18,6 +18,8 @@ USE_DOC_ORI = os.getenv("USE_DOC_ORI", "false").lower() == "true"
 USE_UNWARP = os.getenv("USE_UNWARP", "false").lower() == "true"
 USE_TEXTLINE_ORI = os.getenv("USE_TEXTLINE_ORI", "false").lower() == "true"
 CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
+TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL", None)  # e.g., "PP-OCRv5_server_det"
+TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL", None)  # e.g., "PP-OCRv5_server_rec"
 
 app = FastAPI()
 
@@ -32,6 +34,8 @@ def load_models():
         device="cpu",
         enable_hpi=False,
         cpu_threads=CPU_THREADS,
+        text_detection_model_name=TEXT_DET_MODEL,
+        text_recognition_model_name=TEXT_REC_MODEL,
     )
 
 @app.get("/healthz")
