@@ -18,24 +18,8 @@ USE_DOC_ORI = os.getenv("USE_DOC_ORI", "false").lower() == "true"
 USE_UNWARP = os.getenv("USE_UNWARP", "false").lower() == "true"
 USE_TEXTLINE_ORI = os.getenv("USE_TEXTLINE_ORI", "false").lower() == "true"
 CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
-
-TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL") or "PP-OCRv5_server_det"
-TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL") or "PP-OCRv5_server_rec"
-
-# Valid PaddleX-style config for the OCR pipeline
-PDX_CONFIG = {
-    "pipeline_name": "OCR",
-    "SubModules": {
-        "TextDetection": {
-            "model_name": TEXT_DET_MODEL,
-            "model_dir": None
-        },
-        "TextRecognition": {
-            "model_name": TEXT_REC_MODEL,
-            "model_dir": None
-        }
-    }
-}
+TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL", None)  # e.g., "PP-OCRv5_server_det"
+TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL", None)  # e.g., "PP-OCRv5_server_rec"
 
 app = FastAPI()
 
@@ -50,19 +34,13 @@ def load_models():
         device="cpu",
         enable_hpi=False,
         cpu_threads=CPU_THREADS,
-        paddlex_config=PDX_CONFIG,
+        text_detection_model_name=TEXT_DET_MODEL,
+        text_recognition_model_name=TEXT_REC_MODEL,
     )
-    print(f"Loaded models: det={TEXT_DET_MODEL}, rec={TEXT_REC_MODEL}, lang={OCR_LANG}, version={OCR_VERSION}")
 
 @app.get("/healthz")
 def healthz():
-    return {
-        "status": "ok",
-        "lang": OCR_LANG,
-        "version": OCR_VERSION,
-        "det_model": TEXT_DET_MODEL,
-        "rec_model": TEXT_REC_MODEL
-    }
+    return {"status": "ok", "lang": OCR_LANG, "version": OCR_VERSION}
 
 def _bytes_to_ndarray(b: bytes):
     with Image.open(io.BytesIO(b)) as im:
@@ -79,7 +57,7 @@ async def ocr_endpoint(files: List[UploadFile] = File(...)):
             results.append({
                 "filename": f.filename,
                 "texts": res.json.get("rec_texts", []),
-                "scores": [float(s) for s in preds[0].json.get("rec_scores", [])] if preds else [],
+                "scores": [float(s) for s in res.json.get("rec_scores", [])],
                 "boxes": res.json.get("rec_boxes", []),
             })
     return JSONResponse({"results": results})
