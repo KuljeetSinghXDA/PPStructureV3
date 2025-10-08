@@ -18,11 +18,13 @@ USE_DOC_ORI = os.getenv("USE_DOC_ORI", "false").lower() == "true"
 USE_UNWARP = os.getenv("USE_UNWARP", "false").lower() == "true"
 USE_TEXTLINE_ORI = os.getenv("USE_TEXTLINE_ORI", "false").lower() == "true"
 CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
+
 TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL") or "PP-OCRv5_server_det"
 TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL") or "PP-OCRv5_server_rec"
 
-# Build a PaddleX-style config to override default model selection
+# Valid PaddleX-style config: must include pipeline_name and SubModules
 PDX_CONFIG = {
+    "pipeline_name": "GeneralOCR",
     "SubModules": {
         "TextDetection": {
             "model_name": TEXT_DET_MODEL,
@@ -48,15 +50,19 @@ def load_models():
         device="cpu",
         enable_hpi=False,
         cpu_threads=CPU_THREADS,
-        paddlex_config=PDX_CONFIG,  # takes precedence over language defaults
+        paddlex_config=PDX_CONFIG,  # overrides language-based defaults
     )
-    # Simple startup log to confirm selections
     print(f"Loaded models: det={TEXT_DET_MODEL}, rec={TEXT_REC_MODEL}, lang={OCR_LANG}, version={OCR_VERSION}")
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "lang": OCR_LANG, "version": OCR_VERSION,
-            "det_model": TEXT_DET_MODEL, "rec_model": TEXT_REC_MODEL}
+    return {
+        "status": "ok",
+        "lang": OCR_LANG,
+        "version": OCR_VERSION,
+        "det_model": TEXT_DET_MODEL,
+        "rec_model": TEXT_REC_MODEL
+    }
 
 def _bytes_to_ndarray(b: bytes):
     with Image.open(io.BytesIO(b)) as im:
