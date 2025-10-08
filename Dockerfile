@@ -19,7 +19,14 @@ RUN pip install protobuf==3.20.3
 
 RUN git clone https://github.com/PaddlePaddle/Paddle.git /Paddle && cd /Paddle && git checkout v3.2.0
 
+# Disable -Werror to tolerate warnings during build
+RUN cd /Paddle && sed -i '/-Werror/d' cmake/flags.cmake
+
 RUN cd /Paddle && pip install -r python/requirements.txt
+
+# Set Python version and build parallelism
+ARG PYVER=3.12
+ENV CMAKE_BUILD_PARALLEL_LEVEL=2
 
 RUN mkdir /Paddle/build && cd /Paddle/build && cmake .. \
     -DPY_VERSION=3.12 \
@@ -36,7 +43,12 @@ RUN mkdir /Paddle/build && cd /Paddle/build && cmake .. \
     -DWITH_MKLDNN=OFF \
     -DWITH_AVX=OFF \
     -DWITH_XBYAK=OFF \
-    && make TARGET=ARMV8 -j4 && python3 -m pip install python/dist/*.whl
+    -DPYTHON_EXECUTABLE=/opt/venv/bin/python \
+    -DPYTHON_INCLUDE_DIR=/opt/venv/include/python${PYVER} \
+    -DPYTHON_LIBRARY=/usr/lib/aarch64-linux-gnu/libpython${PYVER}.so && \
+    ulimit -n 8192 && \
+    make TARGET=ARMV8 -j2 && \
+    /opt/venv/bin/pip install python/dist/*.whl
 
 RUN git clone https://github.com/PaddlePaddle/PaddleOCR.git /PaddleOCR && cd /PaddleOCR && git checkout release/3.2
 
