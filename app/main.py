@@ -12,35 +12,30 @@ def _cpu_threads():
     cpus = multiprocessing.cpu_count()
     return max(2, min(8, cpus))
 
+# Read environment variables set in Dokploy UI
 OCR_LANG = os.getenv("OCR_LANG", "en")
-OCR_VERSION = os.getenv("OCR_VERSION", "PP-OCRv5")
-USE_DOC_ORI = os.getenv("USE_DOC_ORI", "false").lower() == "true"
-USE_UNWARP = os.getenv("USE_UNWARP", "false").lower() == "true"
-USE_TEXTLINE_ORI = os.getenv("USE_TEXTLINE_ORI", "false").lower() == "true"
+DET_MODEL = os.getenv("TEXT_DET_MODEL", "PP-OCRv5_server_det")
+REC_MODEL = os.getenv("TEXT_REC_MODEL", "PP-OCRv5_server_rec")
 CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
-TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL", None)  # e.g., "PP-OCRv5_server_det"
-TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL", None)  # e.g., "PP-OCRv5_server_rec"
 
 app = FastAPI()
 
 @app.on_event("startup")
 def load_models():
+    # Correctly initialize PaddleOCR using model directory arguments
+    # to override the default language-based model selection.
     app.state.ocr = PaddleOCR(
         lang=OCR_LANG,
-        ocr_version=OCR_VERSION,
-        use_doc_orientation_classify=USE_DOC_ORI,
-        use_doc_unwarping=USE_UNWARP,
-        use_textline_orientation=USE_TEXTLINE_ORI,
+        det_model_dir=f'/root/.paddlex/official_models/{DET_MODEL}',
+        rec_model_dir=f'/root/.paddlex/official_models/{REC_MODEL}',
+        use_angle_cls=False,
         device="cpu",
-        enable_hpi=False,
-        cpu_threads=CPU_THREADS,
-        text_detection_model_name=TEXT_DET_MODEL,
-        text_recognition_model_name=TEXT_REC_MODEL,
+        cpu_threads=CPU_THREADS
     )
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "lang": OCR_LANG, "version": OCR_VERSION}
+    return {"status": "ok", "lang": OCR_LANG, "det_model": DET_MODEL, "rec_model": REC_MODEL}
 
 def _bytes_to_ndarray(b: bytes):
     with Image.open(io.BytesIO(b)) as im:
@@ -61,3 +56,4 @@ async def ocr_endpoint(files: List[UploadFile] = File(...)):
                 "boxes": res.json.get("rec_boxes", []),
             })
     return JSONResponse({"results": results})
+
