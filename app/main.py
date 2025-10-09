@@ -6,58 +6,66 @@ from pathlib import Path
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 from typing import List
-from paddleocr import PaddleOCR
+from paddleocr import PPStructureV3
 from PIL import Image
 
 def _cpu_threads():
     cpus = multiprocessing.cpu_count()
     return max(2, min(8, cpus))
 
-# Environment (from .env via Compose env_file)
-OCR_LANG = os.getenv("OCR_LANG", "en")
-OCR_VERSION = os.getenv("OCR_VERSION", "PP-OCRv5")
-CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
-TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL", "PP-OCRv5_server_det")
-TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL", "PP-OCRv5_server_rec")
+# Environment (read from .env or container env)
+OCR_LANG = os.getenv("OCR_LANG", "en")  # PP-StructureV3 supports setting lang to select recognition models
+USE_DOC_ORI = os.getenv("USE_DOC_ORI", "false").lower() == "true"
+USE_UNWARP = os.getenv("USE_UNWARP", "false").lower() == "true"
+USE_TEXTLINE_ORI = os.getenv("USE_TEXTLINE_ORI", "false").lower() == "true"
 
+# Chart recognition (optional)
+USE_CHART_RECOGNITION = os.getenv("USE_CHART_RECOGNITION", "false").lower() == "true"
+CHART_RECOGNITION_MODEL_NAME = os.getenv("CHART_RECOGNITION_MODEL_NAME", "PP-Chart2Table")
+
+# Table structure recognition (optional)
+USE_E2E_WIRED_TABLE_REC_MODEL = os.getenv("USE_E2E_WIRED_TABLE_REC_MODEL", "false").lower() == "true"
+USE_E2E_WIRELESS_TABLE_REC_MODEL = os.getenv("USE_E2E_WIRELESS_TABLE_REC_MODEL", "false").lower() == "true"
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = os.getenv("WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME", "SLANeXt_wired")
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = os.getenv("WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME", "SLANeXt_wireless")
+
+CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))  # Optional: PP-StructureV3 runs on CPU
+
+# Cache directory hint (official models download here when first used)
 OFFICIAL_DIR = Path("/root/.paddlex/official_models")
-DET_DIR = OFFICIAL_DIR / TEXT_DET_MODEL
-REC_DIR = OFFICIAL_DIR / TEXT_REC_MODEL
 
 app = FastAPI()
 
 @app.on_event("startup")
-def load_models():
-    kwargs = dict(
+def load_pipeline():
+    # Instantiate PP-StructureV3 pipeline; optional modules controlled by env
+    app.state.pps = PPStructureV3(
         lang=OCR_LANG,
-        ocr_version=OCR_VERSION,
-        device="cpu",
-        enable_hpi=False,
-        cpu_threads=CPU_THREADS,
-        text_detection_model_name=TEXT_DET_MODEL,
-        text_recognition_model_name=TEXT_REC_MODEL,
+        use_doc_orientation_classify=USE_DOC_ORI,
+        use_doc_unwarping=USE_UNWARP,
+        use_textline_orientation=USE_TEXTLINE_ORI,
+        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+        device="cpu"
     )
-    if DET_DIR.exists():
-        kwargs["det_model_dir"] = str(DET_DIR)
-    if REC_DIR.exists():
-        kwargs["rec_model_dir"] = str(REC_DIR)
-
-    app.state.ocr = PaddleOCR(**kwargs)
-
-    print(f"[startup] Using det={TEXT_DET_MODEL} dir_exists={DET_DIR.exists()} | "
-          f"rec={TEXT_REC_MODEL} dir_exists={REC_DIR.exists()} | "
-          f"lang={OCR_LANG} ocr_version={OCR_VERSION} cpu_threads={CPU_THREADS}")
+    print(f"[startup] PP-StructureV3 ready | lang={OCR_LANG} | charts={USE_CHART_RECOGNITION}({CHART_RECOGNITION_MODEL_NAME}) "
+          f"| table_wired={USE_E2E_WIRED_TABLE_REC_MODEL}({WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME}) "
+          f"| table_wireless={USE_E2E_WIRELESS_TABLE_REC_MODEL}({WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME}) "
+          f"| cpu_threads={CPU_THREADS}")
 
 @app.get("/healthz")
 def healthz():
     return {
         "status": "ok",
+        "pipeline": "PP-StructureV3",
         "lang": OCR_LANG,
-        "ocr_version": OCR_VERSION,
-        "det_model": TEXT_DET_MODEL,
-        "rec_model": TEXT_REC_MODEL,
-        "det_cached": DET_DIR.exists(),
-        "rec_cached": REC_DIR.exists(),
+        "charts_enabled": USE_CHART_RECOGNITION,
+        "chart_model": CHART_RECOGNITION_MODEL_NAME,
+        "wired_table_e2e": USE_E2E_WIRED_TABLE_REC_MODEL,
+        "wired_table_model": WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+        "wireless_table_e2e": USE_E2E_WIRELESS_TABLE_REC_MODEL,
+        "wireless_table_model": WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME
     }
 
 def _bytes_to_ndarray(b: bytes):
@@ -66,16 +74,27 @@ def _bytes_to_ndarray(b: bytes):
 
 @app.post("/ocr")
 async def ocr_endpoint(files: List[UploadFile] = File(...)):
+    # Kept endpoint name for backward compatibility; now returns PP-StructureV3 structured results
     results = []
     for f in files:
         content = await f.read()
         img = _bytes_to_ndarray(content)
-        preds = app.state.ocr.predict(input=img)
+        preds = app.state.pps.predict(
+            input=img,
+            use_chart_recognition=USE_CHART_RECOGNITION,
+            use_e2e_wired_table_rec_model=USE_E2E_WIRED_TABLE_REC_MODEL,
+            use_e2e_wireless_table_rec_model=USE_E2E_WIRELESS_TABLE_REC_MODEL
+        )
         for res in preds:
-            results.append({
-                "filename": f.filename,
-                "texts": res.json.get("rec_texts", []),
-                "scores": [float(s) for s in res.json.get("rec_scores", [])],
-                "boxes": res.json.get("rec_boxes", []),
-            })
+            item = {}
+            # Prefer standardized dict payload when available
+            if hasattr(res, "json") and isinstance(res.json, dict):
+                item = res.json
+            else:
+                try:
+                    item = res.to_dict()  # Fallback if provided by the SDK
+                except Exception:
+                    item = {"summary": str(res)}
+            item["filename"] = f.filename
+            results.append(item)
     return JSONResponse({"results": results})
