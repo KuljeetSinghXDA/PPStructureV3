@@ -9,8 +9,6 @@ services:
     volumes:
       - ocr-cache-paddlex:/root/.paddlex
       - ocr-cache-user:/root/.cache
-    networks:
-      - dokploy-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
