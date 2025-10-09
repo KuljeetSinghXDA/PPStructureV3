@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Noninteractive apt + silence pip root warnings
+# Noninteractive apt to avoid debconf Readline/Dialog frontends in Docker
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore \
@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8
 
-# Runtime deps + apt-utils to quiet debconf
+# Minimal runtime deps + apt-utils to quiet debconf, with cleanup
 RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-utils \
     libgomp1 \
@@ -20,17 +20,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 1) PaddlePaddle CPU from BOS index
+# 1) Install PaddlePaddle (CPU) from the official BOS CPU index
 RUN python -m pip install --upgrade pip && \
     python -m pip install --no-cache-dir -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ paddlepaddle
 
-# 2) PaddleX with OCR extras (includes opencv-contrib, numpy, pillow, shapely)
+# 2) Install PaddleX with OCR extras required by PP-StructureV3
 RUN python -m pip install --no-cache-dir "paddlex[ocr]"
 
-# 3) API stack only (no duplicate numpy/pillow/opencv)
+# 3) Install PaddleOCR and API/server deps
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
+# App code
 COPY app ./app
 
 EXPOSE 8000
