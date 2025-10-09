@@ -6,8 +6,15 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 libglib2.0-0 libgl1 ca-certificates curl && \
+# Use Noninteractive only for this RUN; include apt-utils to reduce debconf warnings
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      apt-utils \
+      libgomp1 \
+      libglib2.0-0 \
+      libgl1 \
+      ca-certificates \
+      curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
