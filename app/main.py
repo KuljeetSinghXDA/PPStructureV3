@@ -93,4 +93,67 @@ def healthz():
         "status": "ok",
         "lang": OCR_LANG,
         "ocr_version": OCR_VERSION,
-        "det_model":
+        "det_model": TEXT_DET_MODEL,
+        "rec_model": TEXT_REC_MODEL,
+        "det_cached": DET_DIR.exists(),
+        "rec_cached": REC_DIR.exists(),
+        "structure_enabled": True,
+        "structure_flags": {
+            "region": USE_REGION_DET,
+            "table": USE_TABLE_REC,
+            "formula": USE_FORMULA_REC,
+            "chart": USE_CHART_REC or (CHART_MODEL is not None),
+            "seal": USE_SEAL_REC,
+            "doc_orientation": USE_DOC_ORI,
+            "doc_unwarping": USE_DOC_UNWARP,
+            "textline_orientation": USE_TEXTLINE_ORI,
+        },
+    }
+
+def _bytes_to_ndarray(b: bytes):
+    with Image.open(io.BytesIO(b)) as im:
+        return np.array(im.convert("RGB"))
+
+@app.post("/ocr")
+async def ocr_endpoint(files: List[UploadFile] = File(...)):
+    """Image-based OCR (PP-OCRv5)."""
+    results = []
+    for f in files:
+        content = await f.read()
+        img = _bytes_to_ndarray(content)
+        preds = app.state.ocr.predict(input=img)
+        for res in preds:
+            results.append({
+                "filename": f.filename,
+                "texts": res.json.get("rec_texts", []),
+                "scores": [float(s) for s in res.json.get("rec_scores", [])],
+                "boxes": res.json.get("rec_boxes", []),
+            })
+    return JSONResponse({"results": results})
+
+@app.post("/parse_pdf")
+async def parse_pdf_endpoint(file: UploadFile = File(...)):
+    """PDF/document parsing (PP-StructureV3) -> per-page JSON and Markdown."""
+    # Save uploaded PDF to a temp file for the pipeline to read
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        results = app.state.structure.predict(input=tmp_path)
+
+        pages = []
+        for idx, res in enumerate(results, start=1):
+            pages.append({
+                "page": idx,
+                "json": res.json,
+                "markdown": res.markdown,
+            })
+
+        return JSONResponse({
+            "filename": file.filename,
+            "pages": pages,
+        })
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
