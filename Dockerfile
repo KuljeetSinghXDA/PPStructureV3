@@ -7,20 +7,28 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     LANG=C.UTF-8
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 libglib2.0-0 libgl1 ca-certificates curl && \
+    libgomp1 libglib2.0-0 libgl1 ca-certificates curl ccache && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install PaddlePaddle first from official CPU index (Option B)
+# 1) PaddlePaddle CPU (multi-arch aarch64 supported on your host)
 RUN python -m pip install --upgrade pip && \
     python -m pip install --no-cache-dir -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ paddlepaddle
 
-# Then install paddleocr and server deps
+# 2) Core deps from requirements (installs paddleocr which pulls paddlex base)
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-# App code
+# 3) Ensure PP-StructureV3 extras are installed for the exact paddlex version
+RUN python - <<'PY'\n\
+import paddlex, subprocess, sys\n\
+v = paddlex.__version__\n\
+subprocess.check_call([sys.executable, '-m', 'pip', 'install', f'paddlex[ocr]=={v}'])\n\
+print('Installed paddlex[ocr]==', v)\n\
+PY
+
+# 4) App code
 COPY app ./app
 
 EXPOSE 8000
