@@ -96,7 +96,6 @@ def healthz():
         "rec_model": TEXT_REC_MODEL,
         "det_cached": DET_DIR.exists(),
         "rec_cached": REC_DIR.exists(),
-        "struct_preset": "lab_reports",
         "struct_format": STRUCT_DEFAULT_FORMAT
     }
 
