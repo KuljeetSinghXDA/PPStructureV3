@@ -26,12 +26,8 @@ CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
 TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL", "PP-OCRv5_server_det")
 TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL", "PP-OCRv5_server_rec")
 
-# Structure - lab report optimized
+# Structure
 STRUCT_DEFAULT_FORMAT = os.getenv("STRUCT_DEFAULT_FORMAT", "json").lower()
-USE_TABLE_REC = os.getenv("USE_TABLE_RECOGNITION", "true").lower() == "true"
-USE_FORMULA_REC = os.getenv("USE_FORMULA_RECOGNITION", "true").lower() == "true"
-USE_CHART_REC = os.getenv("USE_CHART_RECOGNITION", "false").lower() == "true"
-USE_SEAL_REC = os.getenv("USE_SEAL_RECOGNITION", "false").lower() == "true"
 USE_DOC_ORI = os.getenv("USE_DOC_ORI", "false").lower() == "true"
 USE_UNWARP = os.getenv("USE_UNWARP", "false").lower() == "true"
 USE_TEXTLINE_ORI = os.getenv("USE_TEXTLINE_ORI", "false").lower() == "true"
@@ -48,13 +44,13 @@ def _bytes_to_ndarray(b: bytes):
 
 @app.on_event("startup")
 def load_models():
-    # OCR with explicit MKLDNN enable for CPU acceleration
+    # OCR with MKLDNN acceleration (defaults to True, explicit for clarity)
     ocr_kwargs = dict(
         lang=OCR_LANG,
         ocr_version=OCR_VERSION,
         device="cpu",
         enable_hpi=False,
-        enable_mkldnn=True,  # Explicit CPU acceleration
+        enable_mkldnn=True,
         cpu_threads=CPU_THREADS,
         text_detection_model_name=TEXT_DET_MODEL,
         text_recognition_model_name=TEXT_REC_MODEL,
@@ -68,14 +64,11 @@ def load_models():
         ocr_kwargs["rec_model_dir"] = str(REC_DIR)
     app.state.ocr = PaddleOCR(**ocr_kwargs)
 
-    # PP-StructureV3 - lab report preset
+    # PP-StructureV3 - ONLY documented parameters
+    # Module toggles (table/chart/seal/formula) are NOT constructor parameters
     app.state.struct = PPStructureV3(
         lang=OCR_LANG,
         device="cpu",
-        use_table_recognition=USE_TABLE_REC,
-        use_formula_recognition=USE_FORMULA_REC,
-        use_chart_recognition=USE_CHART_REC,
-        use_seal_recognition=USE_SEAL_REC,
         use_doc_orientation_classify=USE_DOC_ORI,
         use_doc_unwarping=USE_UNWARP,
         use_textline_orientation=USE_TEXTLINE_ORI,
@@ -83,8 +76,7 @@ def load_models():
     )
 
     print(f"[startup] OCR det={TEXT_DET_MODEL}({DET_DIR.exists()}) rec={TEXT_REC_MODEL}({REC_DIR.exists()}) | "
-          f"struct fmt={STRUCT_DEFAULT_FORMAT} table={USE_TABLE_REC} formula={USE_FORMULA_REC} | "
-          f"cpu_threads={CPU_THREADS} mkldnn=True")
+          f"struct fmt={STRUCT_DEFAULT_FORMAT} | cpu_threads={CPU_THREADS} mkldnn=True")
 
 @app.get("/healthz")
 def healthz():
@@ -134,35 +126,3 @@ async def structure_endpoint(
             outputs = app.state.struct.predict(input=img)
 
             if ofmt == "json":
-                for res in outputs:
-                    res.save_to_json(save_path=tmpdir)
-                json_files = sorted(glob.glob(f"{tmpdir}/*.json"))
-                json_docs = []
-                for jf in json_files:
-                    try:
-                        with open(jf, "r", encoding="utf-8") as fh:
-                            json_docs.append(json.load(fh))
-                    except Exception:
-                        pass
-                payload.append({"filename": f.filename, "documents": json_docs})
-            else:
-                for res in outputs:
-                    res.save_to_markdown(save_path=tmpdir)
-                md_files = sorted(glob.glob(f"{tmpdir}/*.md"))
-                md_docs = []
-                for mf in md_files:
-                    try:
-                        with open(mf, "r", encoding="utf-8") as fh:
-                            md_docs.append(fh.read())
-                    except Exception:
-                        pass
-                payload.append({"filename": f.filename, "documents_markdown": md_docs})
-
-        if ofmt == "json":
-            return JSONResponse({"results": payload})
-        return PlainTextResponse("\n\n".join(
-            f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"])
-            for item in payload
-        ), media_type="text/markdown")
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
