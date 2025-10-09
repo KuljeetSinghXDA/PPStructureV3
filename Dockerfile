@@ -17,7 +17,6 @@ RUN python -m pip install --upgrade pip && \
     python -m pip install --no-cache-dir -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ paddlepaddle
 
 # 2) Install PaddleX with OCR extras required by PP-StructureV3
-#    Extras group ensures all OCR/structure pipeline deps are present
 RUN python -m pip install --no-cache-dir "paddlex[ocr]"
 
 # 3) Install PaddleOCR and API/server deps
