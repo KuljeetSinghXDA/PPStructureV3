@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install PaddlePaddle first from official CPU index
+# Install PaddlePaddle first from official CPU index (Option B)
 RUN python -m pip install --upgrade pip && \
     python -m pip install --no-cache-dir -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ paddlepaddle
 
