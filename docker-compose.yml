@@ -6,24 +6,15 @@ services:
     image: local/paddleocr-ppocrv5:latest
     env_file:
       - .env
-    expose:
-      - "8000"
     volumes:
       - ocr-cache-paddlex:/root/.paddlex
       - ocr-cache-user:/root/.cache
-    networks:
-      - ai-automation-shared
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
       interval: 30s
       timeout: 5s
       retries: 5
-
-networks:
-  ai-automation-shared:
-    external: true
-
 volumes:
   ocr-cache-paddlex: {}
   ocr-cache-user: {}
