@@ -12,11 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install PaddlePaddle first from official CPU index (Option B)
+# 1) Install PaddlePaddle (CPU) from the official index
 RUN python -m pip install --upgrade pip && \
     python -m pip install --no-cache-dir -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ paddlepaddle
 
-# Then install paddleocr and server deps
+# 2) Install PaddleX with OCR extras required by PP-StructureV3
+#    Extras group ensures all OCR/structure pipeline deps are present
+RUN python -m pip install --no-cache-dir "paddlex[ocr]"
+
+# 3) Install PaddleOCR and API/server deps
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
