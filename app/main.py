@@ -10,11 +10,10 @@ from pathlib import Path
 from typing import List, Literal
 
 from fastapi import FastAPI, UploadFile, File, Query
-from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from PIL import Image
 
 from paddleocr import PaddleOCR, PPStructureV3
-from .guide import GUIDE_CONTENT
 
 def _cpu_threads():
     cpus = multiprocessing.cpu_count()
@@ -38,11 +37,7 @@ OFFICIAL_DIR = Path("/root/.paddlex/official_models")
 DET_DIR = OFFICIAL_DIR / TEXT_DET_MODEL
 REC_DIR = OFFICIAL_DIR / TEXT_REC_MODEL
 
-app = FastAPI(
-    title="PaddleOCR & PP-StructureV3 API",
-    description="High-accuracy OCR and document parsing optimized for lab reports and medical documents",
-    version="1.0.0"
-)
+app = FastAPI()
 
 def _bytes_to_ndarray(b: bytes):
     with Image.open(io.BytesIO(b)) as im:
@@ -82,32 +77,6 @@ def load_models():
     print(f"[startup] OCR det={TEXT_DET_MODEL}({DET_DIR.exists()}) rec={TEXT_REC_MODEL}({REC_DIR.exists()}) | "
           f"struct_lang={OCR_LANG} fmt={STRUCT_DEFAULT_FORMAT} cpu_threads={CPU_THREADS}")
 
-@app.get("/", response_class=HTMLResponse)
-def root():
-    """Root endpoint redirects to guide"""
-    return HTMLResponse(content="""
-    <html>
-        <head><title>PaddleOCR API</title></head>
-        <body style="font-family: sans-serif; max-width: 800px; margin: 50px auto;">
-            <h1>PaddleOCR & PP-StructureV3 API</h1>
-            <p>High-accuracy OCR and document parsing for lab reports and medical documents.</p>
-            <ul>
-                <li><a href="/guide">📖 API Guide & Documentation</a></li>
-                <li><a href="/docs">🔧 Interactive API Docs (Swagger)</a></li>
-                <li><a href="/healthz">💚 Health Check</a></li>
-            </ul>
-            <h3>Quick Start</h3>
-            <p><strong>Simple Text Extraction:</strong> POST to <code>/ocr</code></p>
-            <p><strong>Document Parsing (Tables, Formulas):</strong> POST to <code>/structure</code></p>
-        </body>
-    </html>
-    """)
-
-@app.get("/guide", response_class=PlainTextResponse)
-def guide():
-    """Complete API guide with examples and use cases"""
-    return GUIDE_CONTENT
-
 @app.get("/healthz")
 def healthz():
     return {
@@ -123,10 +92,6 @@ def healthz():
 
 @app.post("/ocr")
 async def ocr_endpoint(files: List[UploadFile] = File(...)):
-    """
-    Fast text recognition using PP-OCRv5 server models.
-    Best for: Simple text extraction, receipts, labels, forms.
-    """
     results = []
     for f in files:
         content = await f.read()
@@ -144,13 +109,8 @@ async def ocr_endpoint(files: List[UploadFile] = File(...)):
 @app.post("/structure")
 async def structure_endpoint(
     files: List[UploadFile] = File(...),
-    output_format: Literal["json", "markdown"] = Query(None, description="Output format: json or markdown")
+    output_format: Literal["json", "markdown"] = Query(None)
 ):
-    """
-    Advanced document parsing with PP-StructureV3.
-    Supports: Layout detection, table extraction, formula recognition, reading order.
-    Best for: Lab reports with tables, invoices, scientific papers.
-    """
     ofmt = (output_format or STRUCT_DEFAULT_FORMAT).lower()
     if ofmt not in ("json", "markdown"):
         ofmt = "json"
@@ -191,12 +151,9 @@ async def structure_endpoint(
 
         if ofmt == "json":
             return JSONResponse({"results": payload})
-        return PlainTextResponse(
-            "\n\n".join(
-                f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"])
-                for item in payload
-            ),
-            media_type="text/markdown"
-        )
+        return PlainTextResponse("\n\n".join(
+            f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"])
+            for item in payload
+        ))
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
