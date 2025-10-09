@@ -1,19 +1,20 @@
 import os
 import io
+import tempfile
 import multiprocessing
 import numpy as np
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from typing import List
-from paddleocr import PaddleOCR
+from paddleocr import PaddleOCR, PPStructureV3
 from PIL import Image
 
 def _cpu_threads():
     cpus = multiprocessing.cpu_count()
     return max(2, min(8, cpus))
 
-# Environment (from .env via Compose env_file)
+# Environment (from .env or platform)
 OCR_LANG = os.getenv("OCR_LANG", "en")
 OCR_VERSION = os.getenv("OCR_VERSION", "PP-OCRv5")
 CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
@@ -28,7 +29,8 @@ app = FastAPI()
 
 @app.on_event("startup")
 def load_models():
-    kwargs = dict(
+    # Image OCR pipeline (PP-OCRv5)
+    ocr_kwargs = dict(
         lang=OCR_LANG,
         ocr_version=OCR_VERSION,
         device="cpu",
@@ -38,15 +40,21 @@ def load_models():
         text_recognition_model_name=TEXT_REC_MODEL,
     )
     if DET_DIR.exists():
-        kwargs["det_model_dir"] = str(DET_DIR)
+        ocr_kwargs["det_model_dir"] = str(DET_DIR)
     if REC_DIR.exists():
-        kwargs["rec_model_dir"] = str(REC_DIR)
+        ocr_kwargs["rec_model_dir"] = str(REC_DIR)
+    app.state.ocr = PaddleOCR(**ocr_kwargs)
 
-    app.state.ocr = PaddleOCR(**kwargs)
+    # Document parsing pipeline (PP-StructureV3) for PDFs/images -> JSON/Markdown
+    app.state.struct = PPStructureV3(
+        lang=OCR_LANG,
+        device="cpu",
+        cpu_threads=CPU_THREADS,
+    )
 
-    print(f"[startup] Using det={TEXT_DET_MODEL} dir_exists={DET_DIR.exists()} | "
-          f"rec={TEXT_REC_MODEL} dir_exists={REC_DIR.exists()} | "
-          f"lang={OCR_LANG} ocr_version={OCR_VERSION} cpu_threads={CPU_THREADS}")
+    print(f"[startup] OCR det={TEXT_DET_MODEL} cached={DET_DIR.exists()} | "
+          f"rec={TEXT_REC_MODEL} cached={REC_DIR.exists()} | "
+          f"lang={OCR_LANG} version={OCR_VERSION} cpu_threads={CPU_THREADS}")
 
 @app.get("/healthz")
 def healthz():
@@ -56,6 +64,7 @@ def healthz():
         "ocr_version": OCR_VERSION,
         "det_model": TEXT_DET_MODEL,
         "rec_model": TEXT_REC_MODEL,
+        "pp_structure": True,
         "det_cached": DET_DIR.exists(),
         "rec_cached": REC_DIR.exists(),
     }
@@ -79,3 +88,36 @@ async def ocr_endpoint(files: List[UploadFile] = File(...)):
                 "boxes": res.json.get("rec_boxes", []),
             })
     return JSONResponse({"results": results})
+
+@app.post("/parse_pdf")
+async def parse_pdf(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Please upload a .pdf file")
+    # Save PDF to a temporary file for the pipeline
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        pdf_path = tmp.name
+        tmp.write(await file.read())
+
+    try:
+        results = app.state.struct.predict(input=pdf_path)
+        pages = []
+        md_pages = []
+        for idx, res in enumerate(results, start=1):
+            pages.append({
+                "page": idx,
+                "json": res.json,
+                "markdown": res.markdown,
+            })
+            md_pages.append(res.markdown or "")
+
+        combined_markdown = "\n\n".join(md_pages)
+        return JSONResponse({
+            "filename": file.filename,
+            "pages": pages,
+            "markdown": combined_markdown
+        })
+    finally:
+        try:
+            os.remove(pdf_path)
+        except OSError:
+            pass
