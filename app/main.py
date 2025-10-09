@@ -1,12 +1,14 @@
 import os
 import io
+import json
 import tempfile
 import multiprocessing
 import numpy as np
 from pathlib import Path
+from typing import List
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
-from typing import List
 from paddleocr import PaddleOCR, PPStructureV3
 from PIL import Image
 
@@ -14,47 +16,45 @@ def _cpu_threads():
     cpus = multiprocessing.cpu_count()
     return max(2, min(8, cpus))
 
-# Environment
+# Environment (via Dokploy UI or .env through Compose)
 OCR_LANG = os.getenv("OCR_LANG", "en")
 OCR_VERSION = os.getenv("OCR_VERSION", "PP-OCRv5")
 CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
-TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL")  # None means use lang/version defaults
-TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL")  # None means use lang/version defaults
 
+# Image OCR models (existing endpoint)
+TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL", "PP-OCRv5_server_det")
+TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL", "PP-OCRv5_server_rec")
+
+# PP-StructureV3 override for recognition model (improves English-only PDFs)
+STRUCTURE_REC_MODEL = os.getenv("STRUCTURE_REC_MODEL", None)  # e.g., "en_PP-OCRv5_server_rec"
+
+# Official model cache root
 OFFICIAL_DIR = Path("/root/.paddlex/official_models")
-DET_DIR = OFFICIAL_DIR / TEXT_DET_MODEL if TEXT_DET_MODEL else None
-REC_DIR = OFFICIAL_DIR / TEXT_REC_MODEL if TEXT_REC_MODEL else None
+DET_DIR = OFFICIAL_DIR / TEXT_DET_MODEL
+REC_DIR = OFFICIAL_DIR / TEXT_REC_MODEL
 
 app = FastAPI()
 
 @app.on_event("startup")
 def load_models():
-    # Build args for OCR based on whether custom names/dirs are provided
-    ocr_kwargs = dict(device="cpu", enable_hpi=False, cpu_threads=CPU_THREADS)
-    custom_models = False
-
-    if TEXT_DET_MODEL:
-        ocr_kwargs["text_detection_model_name"] = TEXT_DET_MODEL
-        custom_models = True
-    if TEXT_REC_MODEL:
-        ocr_kwargs["text_recognition_model_name"] = TEXT_REC_MODEL
-        custom_models = True
-    if DET_DIR and DET_DIR.exists():
+    # Image OCR pipeline (existing)
+    ocr_kwargs = dict(
+        lang=OCR_LANG,
+        ocr_version=OCR_VERSION,
+        device="cpu",
+        enable_hpi=False,
+        cpu_threads=CPU_THREADS,
+        text_detection_model_name=TEXT_DET_MODEL,
+        text_recognition_model_name=TEXT_REC_MODEL,
+    )
+    if DET_DIR.exists():
         ocr_kwargs["det_model_dir"] = str(DET_DIR)
-        custom_models = True
-    if REC_DIR and REC_DIR.exists():
+    if REC_DIR.exists():
         ocr_kwargs["rec_model_dir"] = str(REC_DIR)
-        custom_models = True
-
-    # Only include lang/version when not using custom names/dirs
-    if not custom_models:
-        ocr_kwargs["lang"] = OCR_LANG
-        ocr_kwargs["ocr_version"] = OCR_VERSION
-
     app.state.ocr = PaddleOCR(**ocr_kwargs)
 
-    # PP-StructureV3 for PDFs/images -> JSON/Markdown
-    app.state.struct = PPStructureV3(lang=OCR_LANG, device="cpu", cpu_threads=CPU_THREADS)
+    # Prepare PP-StructureV3 factory; instantiate per-request to avoid holding many large models in memory
+    app.state.structure_rec_model = STRUCTURE_REC_MODEL
 
 @app.get("/healthz")
 def healthz():
@@ -64,9 +64,9 @@ def healthz():
         "ocr_version": OCR_VERSION,
         "det_model": TEXT_DET_MODEL,
         "rec_model": TEXT_REC_MODEL,
-        "det_cached": bool(DET_DIR and DET_DIR.exists()),
-        "rec_cached": bool(REC_DIR and REC_DIR.exists()),
-        "pp_structure": True,
+        "structure_rec_model": STRUCTURE_REC_MODEL,
+        "det_cached": DET_DIR.exists(),
+        "rec_cached": REC_DIR.exists(),
     }
 
 def _bytes_to_ndarray(b: bytes):
@@ -91,20 +91,46 @@ async def ocr_endpoint(files: List[UploadFile] = File(...)):
 
 @app.post("/parse_pdf")
 async def parse_pdf(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Please upload a .pdf file")
+    if file.content_type not in ("application/pdf", "application/octet-stream"):
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file.")
+
+    # Write to a temp file for PP-StructureV3
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-        pdf_path = tmp.name
-        tmp.write(await file.read())
+        tmp.write(data)
+        tmp_path = tmp.name
+
+    # Build PP-StructureV3 with optional English recognizer override
+    structure_kwargs = {}
+    if app.state.structure_rec_model:
+        structure_kwargs["text_recognition_model_name"] = app.state.structure_rec_model
+
     try:
-        results = app.state.struct.predict(input=pdf_path)
-        pages, md_pages = [], []
-        for idx, res in enumerate(results, start=1):
-            pages.append({"page": idx, "json": res.json, "markdown": res.markdown})
-            md_pages.append(res.markdown or "")
-        return JSONResponse({"filename": file.filename, "pages": pages, "markdown": "\n\n".join(md_pages)})
+        pipeline = PPStructureV3(**structure_kwargs)
+        output = pipeline.predict(input=tmp_path)
+
+        # Collect per-page JSON and build combined Markdown
+        page_json = []
+        md_list = []
+        md_images_all = []
+
+        for res in output:
+            page_json.append(res.json)
+            md_info = res.markdown
+            md_list.append(md_info)
+            md_images_all.append(md_info.get("markdown_images", {}))
+
+        combined_markdown = pipeline.concatenate_markdown_pages(md_list)
+
+        return JSONResponse({
+            "filename": file.filename,
+            "pages": page_json,
+            "markdown": combined_markdown,
+        })
     finally:
         try:
-            os.remove(pdf_path)
-        except OSError:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
             pass
