@@ -14,47 +14,47 @@ def _cpu_threads():
     cpus = multiprocessing.cpu_count()
     return max(2, min(8, cpus))
 
-# Environment (from .env or platform)
+# Environment
 OCR_LANG = os.getenv("OCR_LANG", "en")
 OCR_VERSION = os.getenv("OCR_VERSION", "PP-OCRv5")
 CPU_THREADS = int(os.getenv("CPU_THREADS", str(_cpu_threads())))
-TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL", "PP-OCRv5_server_det")
-TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL", "PP-OCRv5_server_rec")
+TEXT_DET_MODEL = os.getenv("TEXT_DET_MODEL")  # None means use lang/version defaults
+TEXT_REC_MODEL = os.getenv("TEXT_REC_MODEL")  # None means use lang/version defaults
 
 OFFICIAL_DIR = Path("/root/.paddlex/official_models")
-DET_DIR = OFFICIAL_DIR / TEXT_DET_MODEL
-REC_DIR = OFFICIAL_DIR / TEXT_REC_MODEL
+DET_DIR = OFFICIAL_DIR / TEXT_DET_MODEL if TEXT_DET_MODEL else None
+REC_DIR = OFFICIAL_DIR / TEXT_REC_MODEL if TEXT_REC_MODEL else None
 
 app = FastAPI()
 
 @app.on_event("startup")
 def load_models():
-    # Image OCR pipeline (PP-OCRv5)
-    ocr_kwargs = dict(
-        lang=OCR_LANG,
-        ocr_version=OCR_VERSION,
-        device="cpu",
-        enable_hpi=False,
-        cpu_threads=CPU_THREADS,
-        text_detection_model_name=TEXT_DET_MODEL,
-        text_recognition_model_name=TEXT_REC_MODEL,
-    )
-    if DET_DIR.exists():
+    # Build args for OCR based on whether custom names/dirs are provided
+    ocr_kwargs = dict(device="cpu", enable_hpi=False, cpu_threads=CPU_THREADS)
+    custom_models = False
+
+    if TEXT_DET_MODEL:
+        ocr_kwargs["text_detection_model_name"] = TEXT_DET_MODEL
+        custom_models = True
+    if TEXT_REC_MODEL:
+        ocr_kwargs["text_recognition_model_name"] = TEXT_REC_MODEL
+        custom_models = True
+    if DET_DIR and DET_DIR.exists():
         ocr_kwargs["det_model_dir"] = str(DET_DIR)
-    if REC_DIR.exists():
+        custom_models = True
+    if REC_DIR and REC_DIR.exists():
         ocr_kwargs["rec_model_dir"] = str(REC_DIR)
+        custom_models = True
+
+    # Only include lang/version when not using custom names/dirs
+    if not custom_models:
+        ocr_kwargs["lang"] = OCR_LANG
+        ocr_kwargs["ocr_version"] = OCR_VERSION
+
     app.state.ocr = PaddleOCR(**ocr_kwargs)
 
-    # Document parsing pipeline (PP-StructureV3) for PDFs/images -> JSON/Markdown
-    app.state.struct = PPStructureV3(
-        lang=OCR_LANG,
-        device="cpu",
-        cpu_threads=CPU_THREADS,
-    )
-
-    print(f"[startup] OCR det={TEXT_DET_MODEL} cached={DET_DIR.exists()} | "
-          f"rec={TEXT_REC_MODEL} cached={REC_DIR.exists()} | "
-          f"lang={OCR_LANG} version={OCR_VERSION} cpu_threads={CPU_THREADS}")
+    # PP-StructureV3 for PDFs/images -> JSON/Markdown
+    app.state.struct = PPStructureV3(lang=OCR_LANG, device="cpu", cpu_threads=CPU_THREADS)
 
 @app.get("/healthz")
 def healthz():
@@ -64,9 +64,9 @@ def healthz():
         "ocr_version": OCR_VERSION,
         "det_model": TEXT_DET_MODEL,
         "rec_model": TEXT_REC_MODEL,
+        "det_cached": bool(DET_DIR and DET_DIR.exists()),
+        "rec_cached": bool(REC_DIR and REC_DIR.exists()),
         "pp_structure": True,
-        "det_cached": DET_DIR.exists(),
-        "rec_cached": REC_DIR.exists(),
     }
 
 def _bytes_to_ndarray(b: bytes):
@@ -93,29 +93,16 @@ async def ocr_endpoint(files: List[UploadFile] = File(...)):
 async def parse_pdf(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Please upload a .pdf file")
-    # Save PDF to a temporary file for the pipeline
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         pdf_path = tmp.name
         tmp.write(await file.read())
-
     try:
         results = app.state.struct.predict(input=pdf_path)
-        pages = []
-        md_pages = []
+        pages, md_pages = [], []
         for idx, res in enumerate(results, start=1):
-            pages.append({
-                "page": idx,
-                "json": res.json,
-                "markdown": res.markdown,
-            })
+            pages.append({"page": idx, "json": res.json, "markdown": res.markdown})
             md_pages.append(res.markdown or "")
-
-        combined_markdown = "\n\n".join(md_pages)
-        return JSONResponse({
-            "filename": file.filename,
-            "pages": pages,
-            "markdown": combined_markdown
-        })
+        return JSONResponse({"filename": file.filename, "pages": pages, "markdown": "\n\n".join(md_pages)})
     finally:
         try:
             os.remove(pdf_path)
