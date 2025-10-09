@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Noninteractive apt to avoid debconf Readline/Dialog frontends in Docker
+# Noninteractive apt to avoid debconf Readline/Dialog in Docker
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore \
