@@ -1,4 +1,3 @@
-paddlex[ocr]
 paddleocr
 fastapi[standard]
 uvicorn[standard]
