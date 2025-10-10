@@ -1,13 +1,9 @@
-# Framework + pipeline (exact pins kept for stability)
-paddlepaddle==3.2.0
-paddleocr[doc-parser]==3.2.0
-
-# API server (unpinned to fetch latest at build time)
+# API server (unpinned to pull latest at build)
 fastapi
 uvicorn[standard]
 python-multipart
 
-# Common runtime libs (unpinned to fetch latest at build time)
+# Common runtime libs (usually pulled by PaddleOCR extras; kept here for safety)
 opencv-python-headless
 numpy
 pillow
