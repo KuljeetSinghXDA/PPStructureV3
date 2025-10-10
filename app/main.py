@@ -115,19 +115,49 @@ async def structure_endpoint(
     if ofmt not in ("json", "markdown"):
         ofmt = "json"
 
+    # Use a temp dir to capture pipeline file outputs
     tmpdir = tempfile.mkdtemp(prefix="ppstructv3_")
     payload = []
 
     try:
-        for f in files:
+        for idx, f in enumerate(files):
             content = await f.read()
-            img = _bytes_to_ndarray(content)
-            outputs = app.state.struct.predict(input=img)
+            filename = (f.filename or "").lower()
+            content_type = getattr(f, "content_type", "") or ""
+            is_pdf = filename.endswith(".pdf") or (content_type == "application/pdf")
 
+            # Use a per-file output subdir to avoid mixing results across multiple inputs
+            out_dir = os.path.join(tmpdir, f"out_{idx}")
+            os.makedirs(out_dir, exist_ok=True)
+
+            if is_pdf:
+                # Save PDF to a temp file and let PP-StructureV3 handle pagination internally
+                tf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                try:
+                    tf.write(content)
+                    tf.flush()
+                    tmp_pdf_path = tf.name
+                finally:
+                    tf.close()
+
+                try:
+                    outputs = app.state.struct.predict(input=tmp_pdf_path)
+                finally:
+                    # Cleanup the temporary PDF regardless of inference outcome
+                    try:
+                        os.remove(tmp_pdf_path)
+                    except Exception:
+                        pass
+            else:
+                # Image input: convert to RGB ndarray
+                img = _bytes_to_ndarray(content)
+                outputs = app.state.struct.predict(input=img)
+
+            # Save per-file results via helper methods
             if ofmt == "json":
                 for res in outputs:
-                    res.save_to_json(save_path=tmpdir)
-                json_files = sorted(glob.glob(f"{tmpdir}/*.json"))
+                    res.save_to_json(save_path=out_dir)
+                json_files = sorted(glob.glob(f"{out_dir}/*.json"))
                 json_docs = []
                 for jf in json_files:
                     try:
@@ -138,8 +168,8 @@ async def structure_endpoint(
                 payload.append({"filename": f.filename, "documents": json_docs})
             else:
                 for res in outputs:
-                    res.save_to_markdown(save_path=tmpdir)
-                md_files = sorted(glob.glob(f"{tmpdir}/*.md"))
+                    res.save_to_markdown(save_path=out_dir)
+                md_files = sorted(glob.glob(f"{out_dir}/*.md"))
                 md_docs = []
                 for mf in md_files:
                     try:
@@ -152,7 +182,8 @@ async def structure_endpoint(
         if ofmt == "json":
             return JSONResponse({"results": payload})
         return PlainTextResponse(
-            "\n\n".join(f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) for item in payload)
+            "\n\n".join(f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) for item in payload),
+            media_type="text/markdown"
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
