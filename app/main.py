@@ -1,7 +1,5 @@
 import os
 import tempfile
-from typing import Optional
-
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from paddleocr import PPStructureV3
@@ -23,9 +21,7 @@ def getenv_float(key: str, default: float) -> float:
 
 app = FastAPI(title="PP-StructureV3 Service", version="1.0")
 
-# =========================
-# Read env for pipeline configuration
-# =========================
+# Env -> pipeline config
 use_doc_orientation = getenv_bool("USE_DOC_ORIENTATION", "False")
 use_unwarp = getenv_bool("USE_UNWARP", "False")
 use_textline_ori = getenv_bool("USE_TEXTLINE_ORI", "False")
@@ -42,17 +38,16 @@ use_tensorrt = getenv_bool("USE_TENSORRT", "False")
 precision = os.getenv("PRECISION", "fp32")
 cpu_threads = getenv_int("CPU_THREADS", 4)
 
-# English-only recognition (recommended for lab reports)
-ocr_lang = os.getenv("OCR_LANG", "en")  # PP-StructureV3(lang=\"en\") switches to English recognizer when model unset [web:16]
+# English-only OCR tip
+ocr_lang = os.getenv("OCR_LANG", "en")  # lang="en" selects English recognizer
 
 # Model names
 layout_model = os.getenv("LAYOUT_MODEL") or None
 region_model = os.getenv("REGION_MODEL") or None
 text_det_model = os.getenv("TEXT_DET_MODEL") or None
-
-# If TEXT_REC_MODEL is empty, leave as None so lang=en takes effect
+# Leave recognition model None so `lang` decides the English model
 _text_rec_env = os.getenv("TEXT_REC_MODEL", "").strip()
-text_rec_model = _text_rec_env if _text_rec_env else None  # None => use `lang` selection [web:16]
+text_rec_model = _text_rec_env if _text_rec_env else None
 
 table_cls_model = os.getenv("TABLE_CLS_MODEL") or None
 table_struct_wired = os.getenv("TABLE_STRUCT_WIRED") or None
@@ -77,7 +72,6 @@ text_det_unclip_ratio = getenv_float("TEXT_DET_UNCLIP_RATIO", 2.0)
 
 text_rec_batch = getenv_int("TEXT_REC_BATCH", 2)
 text_rec_score_thresh = getenv_float("TEXT_REC_SCORE_THRESH", 0.0)
-
 textline_ori_batch = getenv_int("TEXTLINE_ORI_BATCH", 1)
 
 chart_batch = getenv_int("CHART_BATCH", 1)
@@ -89,12 +83,10 @@ seal_det_thresh = getenv_float("SEAL_DET_THRESH", 0.2)
 seal_det_box_thresh = getenv_float("SEAL_DET_BOX_THRESH", 0.6)
 seal_det_unclip_ratio = getenv_float("SEAL_DET_UNCLIP_RATIO", 0.5)
 
-# =========================
-# Instantiate PP-StructureV3 pipeline once
-# =========================
+# Instantiate once
 pipeline = PPStructureV3(
-    # Language selection (forces English recognizer when model name is not set)
-    lang=ocr_lang,  # e.g., \"en\" [web:16]
+    # Language
+    lang=ocr_lang,
 
     # Module toggles
     use_doc_orientation_classify=use_doc_orientation,
@@ -129,7 +121,7 @@ pipeline = PPStructureV3(
     text_det_thresh=text_det_thresh,
     text_det_box_thresh=text_det_box_thresh,
     text_det_unclip_ratio=text_det_unclip_ratio,
-    text_recognition_model_name=text_rec_model,  # None => pick English by `lang` [web:16]
+    text_recognition_model_name=text_rec_model,  # None => use `lang`
     text_recognition_batch_size=text_rec_batch,
     text_rec_score_thresh=text_rec_score_thresh,
 
@@ -160,13 +152,11 @@ pipeline = PPStructureV3(
     seal_det_unclip_ratio=seal_det_unclip_ratio,
 )
 
-# =========================
-# Single endpoint without versioning
-# =========================
+# Single endpoint: JSON or Markdown via query
 @app.post("/extract")
 async def extract(
     file: UploadFile = File(...),
-    format: str = Query("json", regex="^(json|markdown)$")
+    format: str = Query("json", pattern="^(json|markdown)$")
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
@@ -174,16 +164,13 @@ async def extract(
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
             tmp.write(await file.read())
             tmp.flush()
-            # One pass inference
-            output = pipeline.predict(tmp.name)  # returns page-wise results [web:16]
+            pages = pipeline.predict(tmp.name)
             if format == "markdown":
-                # Merge per-page Markdown into one document
-                md_list = [res.markdown for res in output]  # per-page markdown payloads [web:16]
-                merged_md = pipeline.concatenate_markdown_pages(md_list)  # helper to merge pages [web:16]
+                md_list = [res.markdown for res in pages]
+                merged_md = pipeline.concatenate_markdown_pages(md_list)
                 return Response(content=merged_md, media_type="text/markdown")
             else:
-                # Structured JSON
-                results = [res.json for res in output]  # per-page structured JSON [web:16]
+                results = [res.json for res in pages]
                 return JSONResponse(content={"pages": len(results), "results": results})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"extract error: {e}")
