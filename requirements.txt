@@ -1,9 +1,0 @@
-# API server (unpinned to pull latest at build)
-fastapi
-uvicorn[standard]
-python-multipart
-
-# Common runtime libs (usually pulled by PaddleOCR extras; kept here for safety)
-opencv-python-headless
-numpy
-pillow
