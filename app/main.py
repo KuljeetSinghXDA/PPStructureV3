@@ -42,11 +42,18 @@ use_tensorrt = getenv_bool("USE_TENSORRT", "False")
 precision = os.getenv("PRECISION", "fp32")
 cpu_threads = getenv_int("CPU_THREADS", 4)
 
+# Language (apply English-only tip)
+ocr_lang = os.getenv("OCR_LANG", "en")  # PPStructureV3(lang="en") selects English recognizer. [web:16]
+
 # Model names
 layout_model = os.getenv("LAYOUT_MODEL") or None
 region_model = os.getenv("REGION_MODEL") or None
 text_det_model = os.getenv("TEXT_DET_MODEL") or None
-text_rec_model = os.getenv("TEXT_REC_MODEL") or None
+
+# If TEXT_REC_MODEL is empty, leave as None so lang=en takes effect
+_text_rec_env = os.getenv("TEXT_REC_MODEL", "").strip()
+text_rec_model = _text_rec_env if _text_rec_env else None  # None => use `lang` selection. [web:16]
+
 table_cls_model = os.getenv("TABLE_CLS_MODEL") or None
 table_struct_wired = os.getenv("TABLE_STRUCT_WIRED") or None
 table_struct_wireless = os.getenv("TABLE_STRUCT_WIRELESS") or None
@@ -84,6 +91,9 @@ seal_det_unclip_ratio = getenv_float("SEAL_DET_UNCLIP_RATIO", 0.5)
 
 # Instantiate PP-StructureV3 pipeline with explicit flags and model names
 pipeline = PPStructureV3(
+    # Language selection (forces English recognizer when model name is not set)
+    lang=ocr_lang,  # e.g., "en". [web:16]
+
     # Module toggles
     use_doc_orientation_classify=use_doc_orientation,
     use_doc_unwarping=use_unwarp,
@@ -93,6 +103,7 @@ pipeline = PPStructureV3(
     use_formula_recognition=use_formula,
     use_chart_recognition=use_chart,
     use_seal_recognition=use_seal,
+
     # Device / backend
     device=device,
     enable_mkldnn=enable_mkldnn,
@@ -100,6 +111,7 @@ pipeline = PPStructureV3(
     use_tensorrt=use_tensorrt,
     precision=precision,
     cpu_threads=cpu_threads,
+
     # Layout & region
     layout_detection_model_name=layout_model,
     layout_threshold=layout_threshold,
@@ -107,6 +119,7 @@ pipeline = PPStructureV3(
     layout_unclip_ratio=layout_unclip_ratio,
     layout_merge_bboxes_mode=layout_merge_mode,
     region_detection_model_name=region_model,
+
     # OCR
     text_detection_model_name=text_det_model,
     text_det_limit_side_len=text_det_limit_side_len,
@@ -114,23 +127,28 @@ pipeline = PPStructureV3(
     text_det_thresh=text_det_thresh,
     text_det_box_thresh=text_det_box_thresh,
     text_det_unclip_ratio=text_det_unclip_ratio,
-    text_recognition_model_name=text_rec_model,
+    text_recognition_model_name=text_rec_model,  # None => pick English by `lang`. [web:16]
     text_recognition_batch_size=text_rec_batch,
     text_rec_score_thresh=text_rec_score_thresh,
+
     # Textline orientation
     textline_orientation_batch_size=textline_ori_batch,
+
     # Tables
     table_classification_model_name=table_cls_model,
     wired_table_structure_recognition_model_name=table_struct_wired,
     wireless_table_structure_recognition_model_name=table_struct_wireless,
     wired_table_cells_detection_model_name=table_cell_det_wired,
     wireless_table_cells_detection_model_name=table_cell_det_wireless,
+
     # Formula
     formula_recognition_model_name=formula_model,
     formula_recognition_batch_size=formula_batch,
+
     # Chart
     chart_recognition_model_name=chart_model,
     chart_recognition_batch_size=chart_batch,
+
     # Seals
     seal_text_detection_model_name=seal_det_model,
     seal_det_limit_side_len=seal_det_limit_side_len,
@@ -153,12 +171,10 @@ async def parse_pdf(file: UploadFile = File(...)):
             content = await file.read()
             tmp.write(content)
             tmp.flush()
-            # Let PP-StructureV3 handle PDF path directly
             output = pipeline.predict(tmp.name)
-            # Convert Paddle result objects to JSON-serializable dicts
             results = []
             for res in output:
-                results.append(res.json)  # each has .json attr per pipeline docs
+                results.append(res.json)
             return JSONResponse(content={"pages": len(results), "results": results})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"parse error: {e}")
