@@ -1,21 +1,15 @@
 services:
-  paddleocr:
+  ppstructure:
     build:
       context: .
       dockerfile: Dockerfile
-    image: local/paddleocr-ppocrv5:latest
+    platform: linux/arm64
     env_file:
       - .env
     volumes:
-      - ocr-cache-paddlex:/root/.paddlex
-      - ocr-cache-user:/root/.cache
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
+      - models-cache:/root/.paddlex
+      - tmp-cache:/tmp
 
 volumes:
-  ocr-cache-paddlex: {}
-  ocr-cache-user: {}
+  models-cache:
+  tmp-cache:
