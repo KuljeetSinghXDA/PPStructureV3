@@ -1,4 +1,8 @@
 import os
+
+# Disable MKLDNN/OneDNN globally before Paddle imports to avoid CPU conv segfaults on some ARM hosts
+os.environ["FLAGS_use_mkldnn"] = "0"
+
 import io
 import json
 import glob
@@ -126,12 +130,12 @@ async def structure_endpoint(
             content_type = getattr(f, "content_type", "") or ""
             is_pdf = filename.endswith(".pdf") or (content_type == "application/pdf")
 
-            # Use a per-file output subdir to avoid mixing results across multiple inputs
+            # Per-file output subdir to avoid mixing multiple inputs
             out_dir = os.path.join(tmpdir, f"out_{idx}")
             os.makedirs(out_dir, exist_ok=True)
 
             if is_pdf:
-                # Save PDF to a temp file and let PP-StructureV3 handle pagination internally
+                # Save PDF to a temp file; let PP-StructureV3 handle pagination internally
                 tf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
                 try:
                     tf.write(content)
@@ -143,7 +147,6 @@ async def structure_endpoint(
                 try:
                     outputs = app.state.struct.predict(input=tmp_pdf_path)
                 finally:
-                    # Cleanup the temporary PDF regardless of inference outcome
                     try:
                         os.remove(tmp_pdf_path)
                     except Exception:
