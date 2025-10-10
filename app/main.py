@@ -1,176 +1,131 @@
-import os
-import tempfile
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
+from typing import Optional, List
+import os, io, tempfile, fitz, requests
+
+# PaddleOCR pipeline (PP-StructureV3)
 from paddleocr import PPStructureV3
 
-def getenv_bool(key: str, default: str = "False") -> bool:
-    return os.getenv(key, default).lower() in ("1", "true", "yes", "on")
+PORT = int(os.getenv("PORT", "8080"))
+OCR_LANG = os.getenv("OCR_LANG", "en")
+USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
+USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
+USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
 
-def getenv_int(key: str, default: int) -> int:
-    try:
-        return int(os.getenv(key, str(default)))
-    except Exception:
-        return default
+ENABLE_TABLE = os.getenv("ENABLE_TABLE", "true").lower() == "true"
+ENABLE_CHART = os.getenv("ENABLE_CHART", "false").lower() == "true"
+ENABLE_FORMULA = os.getenv("ENABLE_FORMULA", "false").lower() == "true"
+ENABLE_SEAL = os.getenv("ENABLE_SEAL", "false").lower() == "true"
 
-def getenv_float(key: str, default: float) -> float:
-    try:
-        return float(os.getenv(key, str(default)))
-    except Exception:
-        return default
+LAYOUT_MODEL = os.getenv("LAYOUT_MODEL", "PP-DocLayout_plus-L")
+OCR_VERSION = os.getenv("OCR_VERSION", "PP-OCRv5")
+TABLE_MODEL = os.getenv("TABLE_MODEL", "PP-TableMagic-L")
+CHART_MODEL = os.getenv("CHART_MODEL", "PP-Chart2Table-L")
+FORMULA_MODEL = os.getenv("FORMULA_MODEL", "PP-FormulaNet_plus-L")
 
-app = FastAPI(title="PP-StructureV3 Service", version="1.0")
+MAX_PAGES = int(os.getenv("MAX_PAGES", "50"))
+MAX_FILE_MB = int(os.getenv("MAX_FILE_MB", "40"))
 
-# Env -> pipeline config
-use_doc_orientation = getenv_bool("USE_DOC_ORIENTATION", "False")
-use_unwarp = getenv_bool("USE_UNWARP", "False")
-use_textline_ori = getenv_bool("USE_TEXTLINE_ORI", "False")
-use_region_det = getenv_bool("USE_REGION_DET", "True")
-use_table = getenv_bool("USE_TABLE", "True")
-use_formula = getenv_bool("USE_FORMULA", "False")
-use_chart = getenv_bool("USE_CHART", "False")
-use_seal = getenv_bool("USE_SEAL", "False")
+app = FastAPI(title="PP-StructureV3 Extractor", version="1.0.0")
 
-device = os.getenv("DEVICE", "cpu")
-enable_mkldnn = getenv_bool("ENABLE_MKLDNN", "True")
-enable_hpi = getenv_bool("ENABLE_HPI", "False")
-use_tensorrt = getenv_bool("USE_TENSORRT", "False")
-precision = os.getenv("PRECISION", "fp32")
-cpu_threads = getenv_int("CPU_THREADS", 4)
+def bytes_limit_ok(nbytes: int) -> bool:
+    return (nbytes / (1024 * 1024)) <= MAX_FILE_MB
 
-# English-only OCR tip
-ocr_lang = os.getenv("OCR_LANG", "en")  # lang="en" selects English recognizer
+def load_pdf_to_images(pdf_bytes: bytes) -> List[io.BytesIO]:
+    images = []
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        for i, page in enumerate(doc):
+            if i >= MAX_PAGES:
+                break
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            img = io.BytesIO(pix.tobytes("png"))
+            images.append(img)
+    return images
 
-# Model names
-layout_model = os.getenv("LAYOUT_MODEL") or None
-region_model = os.getenv("REGION_MODEL") or None
-text_det_model = os.getenv("TEXT_DET_MODEL") or None
-# Leave recognition model None so `lang` decides the English model
-_text_rec_env = os.getenv("TEXT_REC_MODEL", "").strip()
-text_rec_model = _text_rec_env if _text_rec_env else None
+def init_pipeline():
+    # Defaults include PP-DocLayout_plus-L and PP-OCRv5; language set to English
+    # Optional toggles for orientation/unwarping/textline orientation
+    pipeline = PPStructureV3(
+        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+        use_doc_unwarping=USE_DOC_UNWARPING,
+        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+        lang=OCR_LANG,
+        ocr_version=OCR_VERSION,
+        device="cpu"
+    )
+    return pipeline
 
-table_cls_model = os.getenv("TABLE_CLS_MODEL") or None
-table_struct_wired = os.getenv("TABLE_STRUCT_WIRED") or None
-table_struct_wireless = os.getenv("TABLE_STRUCT_WIRELESS") or None
-table_cell_det_wired = os.getenv("TABLE_CELL_DET_WIRED") or None
-table_cell_det_wireless = os.getenv("TABLE_CELL_DET_WIRELESS") or None
-formula_model = os.getenv("FORMULA_MODEL") or None
-chart_model = os.getenv("CHART_MODEL") or None
-seal_det_model = os.getenv("SEAL_DET_MODEL") or None
-
-# Thresholds / batch sizes
-layout_threshold = getenv_float("LAYOUT_THRESHOLD", 0.5)
-layout_nms = getenv_bool("LAYOUT_NMS", "True")
-layout_unclip_ratio = getenv_float("LAYOUT_UNCLIP_RATIO", 1.0)
-layout_merge_mode = os.getenv("LAYOUT_MERGE_MODE", "large")
-
-text_det_limit_side_len = getenv_int("TEXT_DET_LIMIT_SIDE_LEN", 960)
-text_det_limit_type = os.getenv("TEXT_DET_LIMIT_TYPE", "max")
-text_det_thresh = getenv_float("TEXT_DET_THRESH", 0.3)
-text_det_box_thresh = getenv_float("TEXT_DET_BOX_THRESH", 0.6)
-text_det_unclip_ratio = getenv_float("TEXT_DET_UNCLIP_RATIO", 2.0)
-
-text_rec_batch = getenv_int("TEXT_REC_BATCH", 2)
-text_rec_score_thresh = getenv_float("TEXT_REC_SCORE_THRESH", 0.0)
-textline_ori_batch = getenv_int("TEXTLINE_ORI_BATCH", 1)
-
-chart_batch = getenv_int("CHART_BATCH", 1)
-formula_batch = getenv_int("FORMULA_BATCH", 1)
-
-seal_det_limit_side_len = getenv_int("SEAL_DET_LIMIT_SIDE_LEN", 736)
-seal_det_limit_type = os.getenv("SEAL_DET_LIMIT_TYPE", "min")
-seal_det_thresh = getenv_float("SEAL_DET_THRESH", 0.2)
-seal_det_box_thresh = getenv_float("SEAL_DET_BOX_THRESH", 0.6)
-seal_det_unclip_ratio = getenv_float("SEAL_DET_UNCLIP_RATIO", 0.5)
-
-# Instantiate once
-pipeline = PPStructureV3(
-    # Language
-    lang=ocr_lang,
-
-    # Module toggles
-    use_doc_orientation_classify=use_doc_orientation,
-    use_doc_unwarping=use_unwarp,
-    use_textline_orientation=use_textline_ori,
-    use_region_detection=use_region_det,
-    use_table_recognition=use_table,
-    use_formula_recognition=use_formula,
-    use_chart_recognition=use_chart,
-    use_seal_recognition=use_seal,
-
-    # Device / backend
-    device=device,
-    enable_mkldnn=enable_mkldnn,
-    enable_hpi=enable_hpi,
-    use_tensorrt=use_tensorrt,
-    precision=precision,
-    cpu_threads=cpu_threads,
-
-    # Layout & region
-    layout_detection_model_name=layout_model,
-    layout_threshold=layout_threshold,
-    layout_nms=layout_nms,
-    layout_unclip_ratio=layout_unclip_ratio,
-    layout_merge_bboxes_mode=layout_merge_mode,
-    region_detection_model_name=region_model,
-
-    # OCR
-    text_detection_model_name=text_det_model,
-    text_det_limit_side_len=text_det_limit_side_len,
-    text_det_limit_type=text_det_limit_type,
-    text_det_thresh=text_det_thresh,
-    text_det_box_thresh=text_det_box_thresh,
-    text_det_unclip_ratio=text_det_unclip_ratio,
-    text_recognition_model_name=text_rec_model,  # None => use `lang`
-    text_recognition_batch_size=text_rec_batch,
-    text_rec_score_thresh=text_rec_score_thresh,
-
-    # Textline orientation
-    textline_orientation_batch_size=textline_ori_batch,
-
-    # Tables
-    table_classification_model_name=table_cls_model,
-    wired_table_structure_recognition_model_name=table_struct_wired,
-    wireless_table_structure_recognition_model_name=table_struct_wireless,
-    wired_table_cells_detection_model_name=table_cell_det_wired,
-    wireless_table_cells_detection_model_name=table_cell_det_wireless,
-
-    # Formula
-    formula_recognition_model_name=formula_model,
-    formula_recognition_batch_size=formula_batch,
-
-    # Chart
-    chart_recognition_model_name=chart_model,
-    chart_recognition_batch_size=chart_batch,
-
-    # Seals
-    seal_text_detection_model_name=seal_det_model,
-    seal_det_limit_side_len=seal_det_limit_side_len,
-    seal_det_limit_type=seal_det_limit_type,
-    seal_det_thresh=seal_det_thresh,
-    seal_det_box_thresh=seal_det_box_thresh,
-    seal_det_unclip_ratio=seal_det_unclip_ratio,
-)
-
-# Single endpoint: JSON or Markdown via query
-@app.post("/extract")
-async def extract(
-    file: UploadFile = File(...),
-    format: str = Query("json", pattern="^(json|markdown)$")
-):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-            tmp.write(await file.read())
-            tmp.flush()
-            pages = pipeline.predict(tmp.name)
-            if format == "markdown":
-                md_list = [res.markdown for res in pages]
-                merged_md = pipeline.concatenate_markdown_pages(md_list)
-                return Response(content=merged_md, media_type="text/markdown")
+def run_ppstructurev3_on_pages(pipeline, images: List[io.BytesIO]):
+    all_pages = []
+    for img in images:
+        img.seek(0)
+        res = pipeline.predict(img)
+        # Convert results to JSON-serializable dicts
+        page_items = []
+        for r in res:
+            if hasattr(r, "to_dict"):
+                page_items.append(r.to_dict())
             else:
-                results = [res.json for res in pages]
-                return JSONResponse(content={"pages": len(results), "results": results})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"extract error: {e}")
+                try:
+                    page_items.append(dict(r))
+                except Exception:
+                    page_items.append({"repr": repr(r)})
+        all_pages.append(page_items)
+    return all_pages
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.post("/extract")
+async def extract(pdf_url: Optional[str] = Query(default=None), file: Optional[UploadFile] = File(default=None)):
+    if not pdf_url and not file:
+        raise HTTPException(status_code=400, detail="Provide pdf_url query param or upload a PDF file")
+    if pdf_url:
+        r = requests.get(pdf_url, timeout=60)
+        if r.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to fetch PDF")
+        if not bytes_limit_ok(len(r.content)):
+            raise HTTPException(status_code=413, detail="PDF too large")
+        pdf_bytes = r.content
+    else:
+        content = await file.read()
+        if not bytes_limit_ok(len(content)):
+            raise HTTPException(status_code=413, detail="PDF too large")
+        pdf_bytes = content
+
+    images = load_pdf_to_images(pdf_bytes)
+    if not images:
+        raise HTTPException(status_code=400, detail="Empty PDF or no renderable pages")
+
+    pipeline = init_pipeline()
+    structured = run_ppstructurev3_on_pages(pipeline, images)
+
+    # Basic text aggregation from structured items
+    text_pages = []
+    for page in structured:
+        lines = []
+        for item in page:
+            txt = item.get("text") or item.get("res", {}).get("text")
+            if txt:
+                if isinstance(txt, list):
+                    lines.extend([str(t) for t in txt])
+                else:
+                    lines.append(str(txt))
+        text_pages.append("\n".join(lines))
+
+    return JSONResponse(
+        {
+            "pages": structured,
+            "text": text_pages,
+            "meta": {
+                "pages": len(structured),
+                "lang": OCR_LANG,
+                "layout_model": LAYOUT_MODEL,
+                "ocr_version": OCR_VERSION,
+                "table_model": TABLE_MODEL,
+                "chart_model": CHART_MODEL if ENABLE_CHART else None,
+                "formula_model": FORMULA_MODEL if ENABLE_FORMULA else None,
+            },
+        }
+    )
