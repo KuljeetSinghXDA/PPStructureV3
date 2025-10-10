@@ -12,7 +12,6 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 
 RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
-# Exact pins: framework + pipeline
 RUN pip install --no-cache-dir \
     paddlepaddle==3.2.0 \
     "paddleocr[doc-parser]==3.2.0" \
@@ -24,8 +23,4 @@ RUN pip install --no-cache-dir \
 WORKDIR /app
 COPY app /app/app
 
-# Non-root optional:
-# RUN useradd -m -u 10001 appuser && chown -R appuser:appuser /app /root
-# USER appuser
-
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers ${WORKERS}"]
+CMD ["sh","-c","uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --workers ${WORKERS:-2}"]
