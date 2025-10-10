@@ -1,0 +1,13 @@
+# Framework + pipeline (exact pins kept for stability)
+paddlepaddle==3.2.0
+paddleocr[doc-parser]==3.2.0
+
+# API server (unpinned to fetch latest at build time)
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Common runtime libs (unpinned to fetch latest at build time)
+opencv-python-headless
+numpy
+pillow
