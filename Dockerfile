@@ -29,7 +29,7 @@ RUN python -m pip install --no-cache-dir -U pip setuptools wheel
 # Reference: compile with -DWITH_GPU=OFF -DWITH_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
 RUN git clone https://github.com/PaddlePaddle/Paddle.git && \
     cd Paddle && \
-    git checkout v3.0.0 && \
+    git checkout v3.2.0 && \
     mkdir -p build && cd build && \
     cmake .. -DPY_VERSION=3.12 -DWITH_GPU=OFF -DWITH_TESTING=OFF -DCMAKE_BUILD_TYPE=Release && \
     make -j"$(nproc)" && \
