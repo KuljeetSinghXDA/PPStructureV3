@@ -1,15 +1,14 @@
 services:
-  ppstructure:
+  ppstructurev3:
     build:
       context: .
       dockerfile: Dockerfile
-    platform: linux/arm64
-    env_file:
-      - .env
+    expose:
+      - "${PORT}"
     volumes:
-      - models-cache:/root/.paddlex
-      - tmp-cache:/tmp
+      - paddle_cache:/root/.paddlex
+      - paddle_models:/root/.paddleocr
 
 volumes:
-  models-cache:
-  tmp-cache:
+  paddle_cache:
+  paddle_models:
