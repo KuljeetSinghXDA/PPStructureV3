@@ -4,10 +4,11 @@ services:
       context: .
       dockerfile: Dockerfile
     expose:
-      - "${PORT}"
+      - "${PORT:-8080}"
     volumes:
       - paddle_cache:/root/.paddlex
       - paddle_models:/root/.paddleocr
+    restart: unless-stopped
 
 volumes:
   paddle_cache:
