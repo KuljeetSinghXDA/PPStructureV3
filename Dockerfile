@@ -1,9 +1,16 @@
 FROM python:3.13-slim
 
+# Noninteractive apt to suppress debconf warnings in slim containers
+ENV DEBIAN_FRONTEND=noninteractive \
+    DEBCONF_NONINTERACTIVE_SEEN=true \
+    DEBCONF_NOWARNINGS=yes
+
+# Always install latest packages from the base image’s Debian repo snapshot
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 wget && \
     rm -rf /var/lib/apt/lists/*
 
+# Install latest pip and packages, suppressing root warning
 RUN python -m pip install --no-cache-dir -U pip --root-user-action=ignore \
  && python -m pip install --no-cache-dir paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ --root-user-action=ignore \
  && python -m pip install --no-cache-dir "paddleocr[doc-parser]" fastapi uvicorn[standard] python-multipart --root-user-action=ignore
