@@ -7,20 +7,19 @@ import os, tempfile, threading, json
 from paddleocr import PPStructureV3  # PP-StructureV3 pipeline within PaddleOCR
 
 # Runtime config (Dokploy Environment)
-OCR_LANG = os.getenv("OCR_LANG", "en")                 # English only
-CPU_THREADS = int(os.getenv("CPU_THREADS", "1"))       # Minimal intra-op threads for stability
-# Default MKLDNN OFF; can enable later via env if stable on this ARM build
-ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
+OCR_LANG = os.getenv("OCR_LANG", "en")                 # English-only OCR [docs recommend switching off the CN-EN default for pure English]
+CPU_THREADS = int(os.getenv("CPU_THREADS", "1"))       # Minimal intra-op threads for ARM64 stability
+ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"  # Keep off unless verified stable
 
 # Cap OMP/BLAS threads before model init
 os.environ.setdefault("OMP_NUM_THREADS", str(CPU_THREADS))
 os.environ.setdefault("OPENBLAS_NUM_THREADS", str(CPU_THREADS))
 
-# Lighter layout model default to reduce conv load; still PP-StructureV3-compatible
-LAYOUT_MODEL_NAME = os.getenv("LAYOUT_MODEL_NAME", "PP-DocLayout-L")                 # was PP-DocLayout_plus-L
-WIRED_TABLE_STRUCT_MODEL_NAME = os.getenv("WIRED_TABLE_STRUCT_MODEL_NAME", "SLANeXt_wired")
-TEXT_DET_MODEL_NAME = os.getenv("TEXT_DET_MODEL_NAME", "PP-OCRv5_server_det")
-TEXT_REC_MODEL_NAME = os.getenv("TEXT_REC_MODEL_NAME", "PP-OCRv5_server_rec")
+# Auto-select all models by NOT specifying names (let pipeline defaults apply)
+LAYOUT_MODEL_NAME = None
+WIRED_TABLE_STRUCT_MODEL_NAME = None
+TEXT_DET_MODEL_NAME = None
+TEXT_REC_MODEL_NAME = None
 
 # Lazy, thread-safe pipeline with startup pre-warm
 _pp = None
@@ -35,12 +34,12 @@ def get_pipeline():
                     device="cpu",
                     enable_mkldnn=ENABLE_MKLDNN,
                     cpu_threads=CPU_THREADS,
-                    lang=OCR_LANG,
+                    lang=OCR_LANG,  # honored only when no model names are specified
                     layout_detection_model_name=LAYOUT_MODEL_NAME,
                     wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCT_MODEL_NAME,
                     text_detection_model_name=TEXT_DET_MODEL_NAME,
                     text_recognition_model_name=TEXT_REC_MODEL_NAME,
-                    # Disable modules near prior crash sites
+                    # Keep optional modules off for stability on current ARM64 runtime
                     use_doc_orientation_classify=False,
                     use_textline_orientation=False,
                     use_doc_unwarping=False,
@@ -49,7 +48,6 @@ def get_pipeline():
                 )
     return _pp
 
-# Robust invoker to cover __call__/predict/process/infer across PaddleOCR releases
 def run_pps_v3(pipeline, input_path: str):
     if callable(pipeline):
         return pipeline(input_path)
@@ -61,7 +59,6 @@ def run_pps_v3(pipeline, input_path: str):
         return pipeline.infer(input_path)
     raise RuntimeError("Unsupported PPStructureV3 API surface")
 
-# Safe Markdown rendering: build code fences programmatically to avoid unterminated-string issues
 FENCE = "`" * 3
 
 def to_markdown(result) -> str:
@@ -86,7 +83,7 @@ def to_markdown(result) -> str:
                     for row in grid[1:]:
                         lines.append("| " + " | ".join(str(c) for c in row) + " |")
                 elif "html" in res:
-                    lines.append(res["html"])  # Markdown accepts inline HTML
+                    lines.append(res["html"])
                 else:
                     lines.append(FENCE + "json")
                     lines.append(json.dumps(item, ensure_ascii=False))
@@ -99,7 +96,7 @@ def to_markdown(result) -> str:
 
 @asynccontextmanager
 async def lifespan(app):
-    _ = get_pipeline()  # Pre-warm so models are created before first request
+    _ = get_pipeline()  # pre-warm models at startup so defaults are fetched before first request
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -124,7 +121,7 @@ async def parse_doc(
     try:
         with os.fdopen(fd, "wb") as f:
             while True:
-                chunk = await file.read(1 << 20)  # 1 MiB
+                chunk = await file.read(1 << 20)
                 if not chunk:
                     break
                 f.write(chunk)
