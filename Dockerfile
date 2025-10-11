@@ -1,13 +1,22 @@
-# Use official PaddlePaddle CPU runtime image (multi-arch, includes ARM64 builds)
-FROM paddlepaddle/paddle:latest
+FROM python:3.11-slim
 
-# Noninteractive apt to avoid debconf warnings if we install anything later
+# Noninteractive apt to avoid debconf warnings
 ENV DEBIAN_FRONTEND=noninteractive \
     DEBCONF_NONINTERACTIVE_SEEN=true \
     DEBCONF_NOWARNINGS=yes
 
-# Install API/server deps and OCR pipeline; Paddle is already present in base
+# Latest GL/GUI libs commonly required by CV backends used by PaddleOCR
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 wget && \
+    rm -rf /var/lib/apt/lists/*
+
+# Disable MKLDNN at framework level for CPU stability on ARM
+ENV FLAGS_use_mkldnn=0
+
+# Latest pip + Paddle CPU wheel from official CPU index (Armv8/aarch64 supported),
+# plus PaddleOCR (doc-parser), FastAPI, Uvicorn, and python-multipart
 RUN python -m pip install --no-cache-dir -U pip --root-user-action=ignore \
+ && python -m pip install --no-cache-dir paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ --root-user-action=ignore \
  && python -m pip install --no-cache-dir "paddleocr[doc-parser]" fastapi uvicorn[standard] python-multipart --root-user-action=ignore
 
 WORKDIR /app
