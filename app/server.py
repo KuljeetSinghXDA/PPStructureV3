@@ -3,12 +3,12 @@ from fastapi.responses import JSONResponse
 import os, tempfile
 from paddleocr import PPStructureV3
 
-# Runtime config from Dokploy Environment UI
-OCR_LANG = os.getenv("OCR_LANG", "en")
-CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
+# Runtime config provided via Dokploy Environment UI
+OCR_LANG = os.getenv("OCR_LANG", "en")                # English only
+CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))      # Ampere A1: 4 OCPU
 ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "true").lower() == "true"
 
-# Flagship models (names only so latest weights are fetched)
+# Flagship model names (latest weights are fetched automatically)
 LAYOUT_MODEL_NAME = os.getenv("LAYOUT_MODEL_NAME", "PP-DocLayout_plus-L")
 WIRED_TABLE_STRUCT_MODEL_NAME = os.getenv("WIRED_TABLE_STRUCT_MODEL_NAME", "SLANeXt_wired")
 TEXT_DET_MODEL_NAME = os.getenv("TEXT_DET_MODEL_NAME", "PP-OCRv5_server_det")
@@ -42,7 +42,7 @@ async def parse_doc(file: UploadFile = File(...)):
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(await file.read())
-        result = pp(tmp_path)  # No save_path -> no files written
+        result = pp(tmp_path)  # No save_path -> no files written to disk
         return JSONResponse(result)
     finally:
         try:
