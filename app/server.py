@@ -1,14 +1,15 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
+from pathlib import Path
 import os, tempfile
-from paddleocr import PPStructureV3  # pipeline usage documented for CPU + lang + tuning [web:23]
+from paddleocr import PPStructureV3  # PP-StructureV3 pipeline (CPU, lang, mkldnn, threads) [web:23]
 
-# Env from Dokploy UI (English + CPU tuning)
-OCR_LANG = os.getenv("OCR_LANG", "en")
-CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
-ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "true").lower() == "true"
+# Runtime config (set in Dokploy Environment)
+OCR_LANG = os.getenv("OCR_LANG", "en")             # English only [web:23]
+CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))   # Ampere A1: 4 OCPU [web:23]
+ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "true").lower() == "true"  # CPU accel [web:23]
 
-# Flagship model names (latest weights fetched automatically)
+# Flagship model names so the latest checkpoints are fetched automatically [web:23]
 LAYOUT_MODEL_NAME = os.getenv("LAYOUT_MODEL_NAME", "PP-DocLayout_plus-L")
 WIRED_TABLE_STRUCT_MODEL_NAME = os.getenv("WIRED_TABLE_STRUCT_MODEL_NAME", "SLANeXt_wired")
 TEXT_DET_MODEL_NAME = os.getenv("TEXT_DET_MODEL_NAME", "PP-OCRv5_server_det")
@@ -28,38 +29,41 @@ pp = PPStructureV3(
     use_doc_unwarping=False,
     use_formula_recognition=False,
     use_chart_recognition=False,
-)
+)  # [web:23]
 
-# Robust call wrapper for PP-StructureV3 across releases
+# Robust invoker to support releases that expose __call__, predict, process, or infer [web:23]
 def run_pps_v3(pipeline, input_path: str):
-    # Newer builds may offer .predict() or .process(); some offer __call__ [web:23]
     if callable(pipeline):
-        return pipeline(input_path)
+        return pipeline(input_path)  # __call__ if present [web:23]
     if hasattr(pipeline, "predict"):
-        return pipeline.predict(input_path)
+        return pipeline.predict(input_path)  # predict() if provided [web:23]
     if hasattr(pipeline, "process"):
-        return pipeline.process(input_path)
+        return pipeline.process(input_path)  # process() if provided [web:23]
     if hasattr(pipeline, "infer"):
-        return pipeline.infer(input_path)
-    raise RuntimeError("Unsupported PPStructureV3 API: no callable/predict/process/infer found")
+        return pipeline.infer(input_path)    # infer() if provided [web:23]
+    raise RuntimeError("Unsupported PPStructureV3 API surface")  # [web:23]
 
-app = FastAPI()
+app = FastAPI()  # [web:23]
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok"}  # [web:23]
 
 @app.post("/parse")
 async def parse_doc(file: UploadFile = File(...)):
-    # Ephemeral temp file to avoid disk usage; omit save_path so nothing is written [web:23]
-    fd, tmp_path = tempfile.mkstemp(prefix="ppsv3_", dir="/tmp")
+    # Preserve suffix so the pipeline recognizes pdf/jpg/jpeg/png/bmp types [web:23]
+    suffix = Path(file.filename or "").suffix.lower()
+    allowed = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
+    if suffix not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}. Allowed: {', '.join(sorted(allowed))}")  # [web:23]
+    fd, tmp_path = tempfile.mkstemp(prefix="ppsv3_", suffix=suffix, dir="/tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(await file.read())
-        result = run_pps_v3(pp, tmp_path)
-        return JSONResponse(result)
+            f.write(await file.read())  # [web:23]
+        result = run_pps_v3(pp, tmp_path)     # JSON only; no save_path means no files written [web:23]
+        return JSONResponse(result)           # [web:23]
     finally:
         try:
-            os.unlink(tmp_path)
+            os.unlink(tmp_path)               # Always delete inputs after inference [web:23]
         except FileNotFoundError:
-            pass
+            pass                               # [web:23]
