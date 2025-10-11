@@ -1,4 +1,4 @@
-# ===== Stage 1: Build PaddlePaddle (CPU-only, ARM64) =====
+# ===== Stage 1: Build PaddlePaddle (CPU-only, ARM64, stable release) =====
 FROM python:3.11-slim AS paddle-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -9,17 +9,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /paddle
-# Use a stable release tag instead of develop/nightly
+# Clone stable release v3.2.0 instead of develop
 RUN git clone --depth 1 --branch v3.2.0 https://github.com/PaddlePaddle/Paddle.git . && \
     git submodule update --init --recursive
 
-# Python build requirements (+ protobuf pin if needed)
+# Python-side build requirements
 RUN python -m pip install --no-cache-dir -U pip && \
     python -m pip install --no-cache-dir -r /paddle/python/requirements.txt && \
     python -m pip install --no-cache-dir "protobuf==3.20.2"
 
 WORKDIR /paddle/build
-# ARM-friendly CPU-only flags: no MKL/oneDNN/Xbyak, use OpenBLAS, build inference wheel
+# CPU-only, ARM-friendly settings
 RUN cmake .. -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DWITH_GPU=OFF -DWITH_XPU=OFF -DWITH_TENSORRT=OFF \
@@ -29,19 +29,20 @@ RUN cmake .. -G Ninja \
   -DWITH_PYTHON=ON -DPY_VERSION=3.11 \
   -DWITH_TESTING=OFF -DON_INFER=ON
 
+# Build (keep parallelism low on A1)
 ARG BUILD_JOBS=2
 RUN ninja -j${BUILD_JOBS} && ls -lah /paddle/build/python/dist
+
 RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*whl /wheel/
 
 # ===== Stage 2: Runtime with compiled Paddle + PaddleOCR API =====
 FROM python:3.11-slim
 
-# Minimal runtime libs for OCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 && \
     rm -rf /var/lib/apt/lists/*
 
-# Stability flags on ARM64 CPU
+# Global stability flags
 ENV FLAGS_use_mkldnn=0
 ENV OMP_NUM_THREADS=1
 ENV OPENBLAS_NUM_THREADS=1
@@ -52,12 +53,7 @@ RUN python -m pip install --no-cache-dir -U pip && \
     python -m pip install --no-cache-dir "paddleocr[doc-parser]" fastapi uvicorn[standard] python-multipart
 
 WORKDIR /app
-# Copy your FastAPI app if serving PP-StructureV3 via API
-# COPY app /app/app
+COPY app /app/app
 
 EXPOSE 8000
-# For API server:
-# CMD ["uvicorn","app.server:app","--host","0.0.0.0","--port","8000","--workers","1"]
-
-# For CLI testing (optional):
-# ENTRYPOINT ["python","-m","pip","show","paddlepaddle"]
+CMD ["uvicorn","app.server:app","--host","0.0.0.0","--port","8000","--workers","1"]
