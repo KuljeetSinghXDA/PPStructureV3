@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /paddle
-RUN git clone --depth 1 https://github.com/PaddlePaddle/Paddle.git . && \
+RUN git clone --depth 1 --branch release/3.2 https://github.com/PaddlePaddle/Paddle.git . && \
     git submodule update --init --recursive
 
 # Python build deps (per Paddle’s Linux source build guidance)
