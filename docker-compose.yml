@@ -1,5 +1,5 @@
 services:
-  app:
+  PPStructureV3:
     build:
       context: .
       dockerfile: Dockerfile
