@@ -4,23 +4,23 @@ from typing import Literal, Optional
 from pathlib import Path
 from contextlib import asynccontextmanager
 import os, tempfile, threading, json
-from paddleocr import PPStructureV3  # PP-StructureV3 pipeline within PaddleOCR [web:22]
+from paddleocr import PPStructureV3  # PP-StructureV3 pipeline within PaddleOCR
 
 # Runtime config (Dokploy Environment)
-OCR_LANG = os.getenv("OCR_LANG", "en")                 # English only [web:22]
-CPU_THREADS = int(os.getenv("CPU_THREADS", "1"))       # Minimal intra-op threads for stability [web:22]
+OCR_LANG = os.getenv("OCR_LANG", "en")                 # English only
+CPU_THREADS = int(os.getenv("CPU_THREADS", "1"))       # Minimal intra-op threads for stability
 # Default MKLDNN OFF; can enable later via env if stable on this ARM build
-ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"  # [web:22]
+ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
 
 # Cap OMP/BLAS threads before model init
-os.environ.setdefault("OMP_NUM_THREADS", str(CPU_THREADS))        # [web:22]
-os.environ.setdefault("OPENBLAS_NUM_THREADS", str(CPU_THREADS))   # [web:22]
+os.environ.setdefault("OMP_NUM_THREADS", str(CPU_THREADS))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", str(CPU_THREADS))
 
 # Lighter layout model default to reduce conv load; still PP-StructureV3-compatible
-LAYOUT_MODEL_NAME = os.getenv("LAYOUT_MODEL_NAME", "PP-DocLayout-L")                 # was PP-DocLayout_plus-L [web:22]
-WIRED_TABLE_STRUCT_MODEL_NAME = os.getenv("WIRED_TABLE_STRUCT_MODEL_NAME", "SLANeXt_wired")  # [web:22]
-TEXT_DET_MODEL_NAME = os.getenv("TEXT_DET_MODEL_NAME", "PP-OCRv5_server_det")       # [web:22]
-TEXT_REC_MODEL_NAME = os.getenv("TEXT_REC_MODEL_NAME", "PP-OCRv5_server_rec")       # [web:22]
+LAYOUT_MODEL_NAME = os.getenv("LAYOUT_MODEL_NAME", "PP-DocLayout-L")                 # was PP-DocLayout_plus-L
+WIRED_TABLE_STRUCT_MODEL_NAME = os.getenv("WIRED_TABLE_STRUCT_MODEL_NAME", "SLANeXt_wired")
+TEXT_DET_MODEL_NAME = os.getenv("TEXT_DET_MODEL_NAME", "PP-OCRv5_server_det")
+TEXT_REC_MODEL_NAME = os.getenv("TEXT_REC_MODEL_NAME", "PP-OCRv5_server_rec")
 
 # Lazy, thread-safe pipeline with startup pre-warm
 _pp = None
@@ -46,93 +46,96 @@ def get_pipeline():
                     use_doc_unwarping=False,
                     use_formula_recognition=False,
                     use_chart_recognition=False,
-                )  # [web:22]
-    return _pp  # [web:22]
+                )
+    return _pp
 
 # Robust invoker to cover __call__/predict/process/infer across PaddleOCR releases
 def run_pps_v3(pipeline, input_path: str):
     if callable(pipeline):
-        return pipeline(input_path)          # [web:22]
+        return pipeline(input_path)
     if hasattr(pipeline, "predict"):
-        return pipeline.predict(input_path)  # [web:22]
+        return pipeline.predict(input_path)
     if hasattr(pipeline, "process"):
-        return pipeline.process(input_path)  # [web:22]
+        return pipeline.process(input_path)
     if hasattr(pipeline, "infer"):
-        return pipeline.infer(input_path)    # [web:22]
-    raise RuntimeError("Unsupported PPStructureV3 API surface")  # [web:22]
+        return pipeline.infer(input_path)
+    raise RuntimeError("Unsupported PPStructureV3 API surface")
+
+# Safe Markdown rendering: build code fences programmatically to avoid unterminated-string issues
+FENCE = "`" * 3
 
 def to_markdown(result) -> str:
-    pages = result if isinstance(result, list) else [result]  # [web:22]
-    lines = ["# Document"]  # [web:22]
+    pages = result if isinstance(result, list) else [result]
+    lines = ["# Document"]
     for page_idx, page in enumerate(pages, start=1):
-        lines.append(f"\n## Page {page_idx}")  # [web:22]
-        items = page if isinstance(page, list) else page.get("res", []) or page.get("result", [])  # [web:22]
+        lines.append(f"\n## Page {page_idx}")
+        items = page if isinstance(page, list) else page.get("res", []) or page.get("result", [])
         for item in items:
-            itype = item.get("type") or item.get("block_type")  # [web:22]
+            itype = item.get("type") or item.get("block_type")
             if itype in {"text", "paragraph", "title"}:
-                text = item.get("text") or item.get("res", {}).get("text") or ""  # [web:22]
+                text = item.get("text") or item.get("res", {}).get("text") or ""
                 if text:
-                    lines.append(text.strip())  # [web:22]
+                    lines.append(text.strip())
             elif itype in {"table"}:
-                res = item.get("res") or {}  # [web:22]
-                grid = res.get("table", None) or res.get("cells", None)  # [web:22]
+                res = item.get("res") or {}
+                grid = res.get("table", None) or res.get("cells", None)
                 if isinstance(grid, list) and grid and isinstance(grid[0], list):
-                    header = [str(c) for c in grid[0]]  # [web:22]
-                    lines.append("| " + " | ".join(header) + " |")  # [web:22]
-                    lines.append("| " + " | ".join(["---"] * len(header)) + " |")  # [web:22]
+                    header = [str(c) for c in grid[0]]
+                    lines.append("| " + " | ".join(header) + " |")
+                    lines.append("| " + " | ".join(["---"] * len(header)) + " |")
                     for row in grid[1:]:
-                        lines.append("| " + " | ".join(str(c) for c in row) + " |")  # [web:22]
+                        lines.append("| " + " | ".join(str(c) for c in row) + " |")
                 elif "html" in res:
-                    lines.append(res["html"])  # [web:22]
+                    lines.append(res["html"])  # Markdown accepts inline HTML
                 else:
-                    lines.append("```
-                    lines.append(json.dumps(item, ensure_ascii=False))  #[1]
-                    lines.append("```")  # [web:22]
+                    lines.append(FENCE + "json")
+                    lines.append(json.dumps(item, ensure_ascii=False))
+                    lines.append(FENCE)
             else:
-                lines.append("```
-                lines.append(json.dumps(item, ensure_ascii=False))  #[1]
-                lines.append("```")  # [web:22]
-    return "\n".join(lines)  # [web:22]
+                lines.append(FENCE + "json")
+                lines.append(json.dumps(item, ensure_ascii=False))
+                lines.append(FENCE)
+    return "\n".join(lines)
 
 @asynccontextmanager
 async def lifespan(app):
-    _ = get_pipeline()  # Pre-warm so models are created before first request [web:22]
-    yield  # [web:22]
+    _ = get_pipeline()  # Pre-warm so models are created before first request
+    yield
 
-app = FastAPI(lifespan=lifespan)  # [web:22]
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}  # [web:22]
+    return {"status": "ok"}
 
 @app.post("/parse")
 async def parse_doc(
     file: UploadFile = File(...),
     output_format: Optional[Literal["json", "markdown"]] = Query(default="json")
 ):
-    suffix = Path(file.filename or "").suffix.lower()  # [web:22]
-    allowed = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}  # [web:22]
+    suffix = Path(file.filename or "").suffix.lower()
+    allowed = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
     if suffix not in allowed:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type: {suffix}. Allowed: {', '.join(sorted(allowed))}"
-        )  # [web:22]
-    fd, tmp_path = tempfile.mkstemp(prefix="ppsv3_", suffix=suffix, dir="/tmp")  # [web:22]
+        )
+    fd, tmp_path = tempfile.mkstemp(prefix="ppsv3_", suffix=suffix, dir="/tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             while True:
-                chunk = await file.read(1 << 20)  # 1 MiB chunk [web:22]
+                chunk = await file.read(1 << 20)  # 1 MiB
                 if not chunk:
-                    break  # [web:22]
-                f.write(chunk)  # [web:22]
-        pp = get_pipeline()                 # Ensure pipeline exists (warm or hot) [web:22]
-        result = run_pps_v3(pp, tmp_path)  # No save_path; returns structured result [web:22]
+                    break
+                f.write(chunk)
+        pp = get_pipeline()
+        result = run_pps_v3(pp, tmp_path)
         if output_format == "markdown":
-            md = to_markdown(result)  # [web:22]
-            return PlainTextResponse(md, media_type="text/markdown")  # [web:22]
-        return JSONResponse(result)  # [web:22]
+            md = to_markdown(result)
+            return PlainTextResponse(md, media_type="text/markdown")
+        return JSONResponse(result)
     finally:
         try:
-            os.unlink(tmp_path)  # Always delete inputs after inference [web:22]
+            os.unlink(tmp_path)
         except FileNotFoundError:
-            pass  # [web:22]
+            pass
