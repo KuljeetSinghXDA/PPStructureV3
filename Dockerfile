@@ -1,4 +1,3 @@
-# ===== Stage 1: Build PaddlePaddle (CPU-only, ARM64) =====
 FROM python:3.11-slim AS paddle-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
