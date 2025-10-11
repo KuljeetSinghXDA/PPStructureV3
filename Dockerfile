@@ -1,4 +1,4 @@
-# ===== Stage 1: Build PaddlePaddle (CPU-only, ARM64) =====
+# ===== Stage 1: Build PaddlePaddle (CPU-only, ARM64, Inference-Only) =====
 FROM python:3.11-slim AS paddle-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -10,26 +10,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /paddle
+# Pin to the latest stable release branch (3.2)
 RUN git clone --depth 1 --branch release/3.2 https://github.com/PaddlePaddle/Paddle.git . && \
     git submodule update --init --recursive
 
-# Python build deps (per Paddle’s Linux source build guidance)
+# Install Python build dependencies
 RUN python -m pip install --no-cache-dir -U pip && \
     python -m pip install --no-cache-dir -r /paddle/python/requirements.txt && \
     python -m pip install --no-cache-dir "protobuf==3.20.2"
 
+# **CRITICAL FIX**: Always start with a clean build directory
+RUN rm -rf /paddle/build && mkdir /paddle/build
 WORKDIR /paddle/build
-# CPU-only, Arm-friendly, inference-only build
+
+# **CRITICAL FIX**: Add WITH_SPARSE_TENSOR=OFF
+# This command now compiles a minimal, inference-only, ARM-native wheel
 RUN cmake .. -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DWITH_GPU=OFF -DWITH_XPU=OFF -DWITH_TENSORRT=OFF \
   -DWITH_MKL=OFF -DWITH_SYSTEM_BLAS=ON -DWITH_OPENBLAS=ON \
   -DWITH_MKLDNN=OFF -DWITH_ONEDNN=OFF \
   -DWITH_ARM=ON -DWITH_AVX=OFF -DWITH_XBYAK=OFF \
-  -DWITH_PIR=OFF -DWITH_DISTRIBUTE=OFF \
+  -DWITH_PIR=OFF -DWITH_DISTRIBUTE=OFF -DWITH_SPARSE_TENSOR=OFF \
   -DWITH_PYTHON=ON -DPY_VERSION=3.11 \
   -DWITH_TESTING=OFF -DON_INFER=ON
 
+# Build with low parallelism to avoid OOM on smaller VMs
 ARG BUILD_JOBS=2
 RUN ninja -j${BUILD_JOBS} && ls -lah /paddle/build/python/dist
 
@@ -38,12 +44,12 @@ RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*.whl /wheel/
 # ===== Stage 2: Runtime with compiled Paddle + PaddleOCR API =====
 FROM python:3.11-slim
 
-# Minimal runtime libs for CV backends
+# Minimal runtime libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 && \
     rm -rf /var/lib/apt/lists/*
 
-# Global stability flags for CPU inference
+# Global stability flags
 ENV FLAGS_use_mkldnn=0
 ENV OMP_NUM_THREADS=1
 ENV OPENBLAS_NUM_THREADS=1
