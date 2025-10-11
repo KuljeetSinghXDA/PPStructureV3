@@ -1,14 +1,14 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 import os, tempfile
-from paddleocr import PPStructureV3
+from paddleocr import PPStructureV3  # pipeline usage documented for CPU + lang + tuning [web:23]
 
-# Runtime config provided via Dokploy Environment UI
-OCR_LANG = os.getenv("OCR_LANG", "en")                # English only
-CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))      # Ampere A1: 4 OCPU
+# Env from Dokploy UI (English + CPU tuning)
+OCR_LANG = os.getenv("OCR_LANG", "en")
+CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "true").lower() == "true"
 
-# Flagship model names (latest weights are fetched automatically)
+# Flagship model names (latest weights fetched automatically)
 LAYOUT_MODEL_NAME = os.getenv("LAYOUT_MODEL_NAME", "PP-DocLayout_plus-L")
 WIRED_TABLE_STRUCT_MODEL_NAME = os.getenv("WIRED_TABLE_STRUCT_MODEL_NAME", "SLANeXt_wired")
 TEXT_DET_MODEL_NAME = os.getenv("TEXT_DET_MODEL_NAME", "PP-OCRv5_server_det")
@@ -30,6 +30,19 @@ pp = PPStructureV3(
     use_chart_recognition=False,
 )
 
+# Robust call wrapper for PP-StructureV3 across releases
+def run_pps_v3(pipeline, input_path: str):
+    # Newer builds may offer .predict() or .process(); some offer __call__ [web:23]
+    if callable(pipeline):
+        return pipeline(input_path)
+    if hasattr(pipeline, "predict"):
+        return pipeline.predict(input_path)
+    if hasattr(pipeline, "process"):
+        return pipeline.process(input_path)
+    if hasattr(pipeline, "infer"):
+        return pipeline.infer(input_path)
+    raise RuntimeError("Unsupported PPStructureV3 API: no callable/predict/process/infer found")
+
 app = FastAPI()
 
 @app.get("/health")
@@ -38,11 +51,12 @@ def health():
 
 @app.post("/parse")
 async def parse_doc(file: UploadFile = File(...)):
+    # Ephemeral temp file to avoid disk usage; omit save_path so nothing is written [web:23]
     fd, tmp_path = tempfile.mkstemp(prefix="ppsv3_", dir="/tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(await file.read())
-        result = pp(tmp_path)  # No save_path -> no files written to disk
+        result = run_pps_v3(pp, tmp_path)
         return JSONResponse(result)
     finally:
         try:
