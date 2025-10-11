@@ -1,3 +1,4 @@
+# ===== Stage 1: Build PaddlePaddle (CPU-only, ARM64) =====
 FROM python:3.11-slim AS paddle-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -41,7 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*  # Common runtime libs for OCR stacks [web:55]
 
 # Global stability flags: disable MKLDNN and cap thread counts
-ENV FLAGS_use_mkldnn=0 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1  # Disable MKLDNN and cap threads at runtime [web:47][web:93]
+ENV FLAGS_use_mkldnn=0 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 
 # Install compiled Paddle and server deps
 COPY --from=paddle-builder /wheel /tmp/wheel
