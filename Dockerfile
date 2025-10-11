@@ -1,16 +1,16 @@
 FROM python:3.13-slim
 
-# Noninteractive apt to suppress debconf warnings in slim containers
+# Noninteractive apt to avoid debconf warnings in slim images
 ENV DEBIAN_FRONTEND=noninteractive \
     DEBCONF_NONINTERACTIVE_SEEN=true \
     DEBCONF_NOWARNINGS=yes
 
-# Always install latest packages from the base image’s Debian repo snapshot
+# Latest GL libs often needed by CV backends used by PaddleOCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 wget && \
     rm -rf /var/lib/apt/lists/*
 
-# Install latest pip and packages, suppressing root warning
+# Latest stable CPU wheel for Armv8/aarch64 plus PaddleOCR with doc-parser and API server deps
 RUN python -m pip install --no-cache-dir -U pip --root-user-action=ignore \
  && python -m pip install --no-cache-dir paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ --root-user-action=ignore \
  && python -m pip install --no-cache-dir "paddleocr[doc-parser]" fastapi uvicorn[standard] python-multipart --root-user-action=ignore
