@@ -1,47 +1,12 @@
-version: "3.9"
-
 services:
-  ppstructurev3:
+  app:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ppstructurev3:aarch64-3.2.0
-    container_name: ppstructurev3
-    environment:
-      # Paddle/PaddleOCR versions (baked in image) and runtime controls
-      OMP_NUM_THREADS: "4"
-      MKL_NUM_THREADS: "4"
-      PADDLE_PDX_MODEL_SOURCE: "HUGGINGFACE"
-      # Pipeline toggles optimized for English lab reports
-      USE_DOC_ORIENTATION_CLASSIFY: "false"
-      USE_DOC_UNWARPING: "false"
-      USE_TEXTLINE_ORIENTATION: "false"
-      USE_REGION_DETECTION: "true"
-      USE_TABLE_RECOGNITION: "true"
-      USE_FORMULA_RECOGNITION: "false"
-      USE_CHART_RECOGNITION: "false"
-      USE_SEAL_RECOGNITION: "false"
-      CPU_THREADS: "4"
-      ENABLE_MKLDNN: "true"
-      # Flagship model selections (layout/OCR/table)
-      LAYOUT_DETECTION_MODEL_NAME: "PP-DocLayout_plus-L"
-      REGION_DETECTION_MODEL_NAME: "PP-DocBlockLayout"
-      TEXT_DETECTION_MODEL_NAME: "PP-OCRv5_server_det"
-      TEXT_RECOGNITION_MODEL_NAME: "PP-OCRv5_server_rec"
-      TABLE_ORIENTATION_CLASSIFY_MODEL_NAME: "PP-LCNet_x1_0_table_cls"
-      WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME: "SLANeXt_wired"
-      WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME: "SLANeXt_wireless"
-      WIRED_TABLE_CELLS_DETECTION_MODEL_NAME: "RT-DETR-L_wired_table_cell_det"
-      WIRELESS_TABLE_CELLS_DETECTION_MODEL_NAME: "RT-DETR-L_wireless_table_cell_det"
-      # Service config
-      HOST: "0.0.0.0"
-      PORT: "8080"
-    ports:
-      - "8080:8080"
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
     restart: unless-stopped
+    expose:
+      - "8000"
+    volumes:
+      - ./cache:/root/.cache
+    command: >
+      uvicorn app.server:app --host 0.0.0.0 --port 8000 --workers 2
