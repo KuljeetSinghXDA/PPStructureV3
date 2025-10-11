@@ -6,8 +6,9 @@ from paddleocr import PPStructureV3  # PP-StructureV3 pipeline (CPU, lang, mkldn
 
 # Runtime config (set in Dokploy Environment)
 OCR_LANG = os.getenv("OCR_LANG", "en")             # English only [web:23]
-CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))   # Ampere A1: 4 OCPU [web:23]
-ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "true").lower() == "true"  # CPU accel [web:23]
+CPU_THREADS = int(os.getenv("CPU_THREADS", "2"))   # Start conservative after segfault; can raise to 4 later [web:23]
+# Default MKLDNN OFF for stability on current Arm build; can flip on via env if stable
+ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"  # [web:23]
 
 # Flagship model names so the latest checkpoints are fetched automatically [web:23]
 LAYOUT_MODEL_NAME = os.getenv("LAYOUT_MODEL_NAME", "PP-DocLayout_plus-L")
@@ -17,21 +18,21 @@ TEXT_REC_MODEL_NAME = os.getenv("TEXT_REC_MODEL_NAME", "PP-OCRv5_server_rec")
 
 pp = PPStructureV3(
     device="cpu",
-    enable_mkldnn=ENABLE_MKLDNN,
-    cpu_threads=CPU_THREADS,
+    enable_mkldnn=ENABLE_MKLDNN,     # default false; enable later if stable [web:23]
+    cpu_threads=CPU_THREADS,         # conservative start [web:23]
     lang=OCR_LANG,
     layout_detection_model_name=LAYOUT_MODEL_NAME,
     wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCT_MODEL_NAME,
     text_detection_model_name=TEXT_DET_MODEL_NAME,
     text_recognition_model_name=TEXT_REC_MODEL_NAME,
-    use_doc_orientation_classify=True,
+    # Turn OFF orientation classify to avoid the module that initialized before crash [web:23]
+    use_doc_orientation_classify=False,
     use_textline_orientation=False,
     use_doc_unwarping=False,
     use_formula_recognition=False,
     use_chart_recognition=False,
 )  # [web:23]
 
-# Robust invoker to support releases that expose __call__, predict, process, or infer [web:23]
 def run_pps_v3(pipeline, input_path: str):
     if callable(pipeline):
         return pipeline(input_path)  # __call__ if present [web:23]
@@ -51,7 +52,6 @@ def health():
 
 @app.post("/parse")
 async def parse_doc(file: UploadFile = File(...)):
-    # Preserve suffix so the pipeline recognizes pdf/jpg/jpeg/png/bmp types [web:23]
     suffix = Path(file.filename or "").suffix.lower()
     allowed = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
     if suffix not in allowed:
