@@ -44,7 +44,7 @@ RUN cmake .. -G Ninja \
   -DWITH_STRIP=ON -DWITH_UNITY_BUILD=OFF \
   -DWITH_PYTHON=ON -DPY_VERSION=3.11
 
-ARG BUILD_JOBS=1
+ARG BUILD_JOBS=4
 RUN ninja -j${BUILD_JOBS} && ls -lah /paddle/build/python/dist
 RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*.whl /wheel/
 
