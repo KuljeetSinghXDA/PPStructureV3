@@ -20,9 +20,6 @@ _pp = None
 _pp_lock = threading.Lock()
 
 
-app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
-
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
