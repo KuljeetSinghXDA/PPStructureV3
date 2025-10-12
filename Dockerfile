@@ -51,6 +51,7 @@ RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*.whl /wheel/
 # ===== Stage 2: Runtime (finalized) =====
 FROM python:3.11-slim
 
+# Runtime libs required by the custom Paddle wheel
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
     libopenblas0 libgfortran5 libgomp1 \
@@ -59,27 +60,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=paddle-builder /wheel /tmp/wheel
 
 RUN python -m pip install --no-cache-dir -U pip && \
-    # 1) Install your custom ARM64 Paddle wheel
+    # 1) Install custom Paddle wheel first (protect this)
     python -m pip install --no-cache-dir /tmp/wheel/*.whl && \
-    # 2) Install PaddleOCR/PaddleX without deps to protect your wheel
+    # 2) Install PaddleOCR & PaddleX without deps (won’t replace Paddle)
     python -m pip install --no-cache-dir --no-deps "paddleocr==3.2.*" && \
     python -m pip install --no-cache-dir --no-deps "paddlex==3.2.*" && \
-    # 3) Satisfy paddlex[ocr] extras completely (no paddlepaddle here)
+    # 3) Satisfy paddlex[ocr] extras manually (no paddlepaddle here)
     python -m pip install --no-cache-dir \
         opencv-python-headless opencv-contrib-python \
         pillow pyyaml shapely scikit-image imgaug \
         pyclipper lmdb tqdm numpy visualdl rapidfuzz cython \
         lanms-neo attrdict easydict \
-        reportlab pypdf pdfminer.six PyMuPDF \
-        ftfy imagesize lxml openpyxl premailer pypdfium2>=4 \
-        scikit-learn tokenizers==0.19.1 \
-        matplotlib requests typing_extensions && \
+        reportlab pypdf pdfminer.six PyMuPDF pypdfium2>=4 \
+        ftfy imagesize lxml openpyxl premailer scikit-learn \
+        tokenizers==0.19.1 matplotlib requests typing_extensions && \
     # 4) API stack
     python -m pip install --no-cache-dir fastapi uvicorn[standard] python-multipart && \
-    # 5) Sanity check: confirm the installed Paddle is your wheel
+    # 5) Verify only the custom Paddle is present
     python -c "import paddle; print('Paddle version:', paddle.__version__); print('Paddle path:', paddle.__file__)" && \
     rm -rf /tmp/wheel
-
+    
 WORKDIR /app
 COPY app /app/app
 
