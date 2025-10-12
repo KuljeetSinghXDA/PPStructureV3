@@ -48,10 +48,10 @@ ARG BUILD_JOBS=4
 RUN ninja -j${BUILD_JOBS} && ls -lah /paddle/build/python/dist
 RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*.whl /wheel/
 
-# ===== Stage 2: Runtime (UPDATED) =====
+# ===== Stage 2: Runtime =====
 FROM python:3.11-slim
 
-# Runtime math/libs required by your Paddle wheel
+# CRITICAL: Install runtime math/libs that the built wheel needs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
     libopenblas0 libgfortran5 libgomp1 \
@@ -59,14 +59,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=paddle-builder /wheel /tmp/wheel
 
+# Safe install sequence to preserve custom Paddle wheel
 RUN python -m pip install --no-cache-dir -U pip && \
-    # 1) Install your custom ARM64 Paddle wheel
+    # 1) Install your custom ARM64 Paddle wheel first
     python -m pip install --no-cache-dir /tmp/wheel/*.whl && \
-    # 2) Install PaddleOCR without dependencies to avoid replacing Paddle
+    # 2) Install PaddleOCR without dependencies to prevent Paddle replacement
     python -m pip install --no-cache-dir --no-deps "paddleocr==3.2.*" && \
-    # 3) Install PaddleX without dependencies (needed by PPStructureV3 internals)
+    # 3) Install PaddleX without dependencies (required by PPStructureV3)
     python -m pip install --no-cache-dir --no-deps "paddlex==3.2.*" && \
-    # 4) Manually satisfy paddlex[ocr] extra packages (no paddlepaddle here)
+    # 4) Manually satisfy paddlex[ocr] extra packages (no paddlepaddle)
     python -m pip install --no-cache-dir \
         opencv-python-headless opencv-contrib-python \
         pillow pyyaml shapely scikit-image imgaug \
@@ -74,8 +75,10 @@ RUN python -m pip install --no-cache-dir -U pip && \
         lanms-neo attrdict easydict \
         reportlab pypdf pdfminer.six PyMuPDF \
         onnx onnxruntime matplotlib requests typing_extensions && \
-    # 5) API stack
+    # 5) Install FastAPI stack
     python -m pip install --no-cache-dir fastapi uvicorn[standard] python-multipart && \
+    # 6) Verify only ONE paddlepaddle is installed (your custom wheel)
+    python -c "import paddle; print('Paddle version:', paddle.__version__); print('Paddle path:', paddle.__file__)" && \
     rm -rf /tmp/wheel
 
 WORKDIR /app
