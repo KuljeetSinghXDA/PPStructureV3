@@ -73,7 +73,6 @@ MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 
 _pp = None
 _pp_lock = threading.Lock()
-_predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
 
 
 def get_pipeline():
