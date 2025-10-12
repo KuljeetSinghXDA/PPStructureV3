@@ -7,29 +7,11 @@ import shutil
 from pathlib import Path
 from typing import List, Literal, Optional
 from contextlib import asynccontextmanager
-
-# Threading caps to avoid nested parallelism and dueling thread pools
-os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "1"))
-os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
-
-# Pin OpenBLAS to a safe ARM core on Ampere A1
-os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
-
-# Default: disable MKLDNN on ARM unless explicitly enabled via env
-os.environ.setdefault("FLAGS_use_mkldnn", "0")
-
-# Optional noise reduction and GC tuning
-os.environ.setdefault("GLOG_minloglevel", "2")
-os.environ.setdefault("FLAGS_eager_delete_tensor_gb", "0.0")
-
-# -----------------------------------------------------------------------
-
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
 from paddleocr import PPStructureV3  # import after envs are applied
-
 
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
@@ -42,7 +24,7 @@ CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
 ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
 
-# Optional modules
+# Optional modules (see PaddleOCR pipeline docs)
 USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
 USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
 USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
@@ -85,7 +67,6 @@ _pp = None
 _pp_lock = threading.Lock()
 _predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
 
-
 def get_pipeline():
     global _pp
     if _pp is None:
@@ -93,9 +74,9 @@ def get_pipeline():
             if _pp is None:
                 _pp = PPStructureV3(
                     device=DEVICE,
-                    enable_mkldnn=ENABLE_MKLDNN,
+                    enable_mkldnn=ENABLE_MKLDNN,  # documented CPU accel flag
                     enable_hpi=ENABLE_HPI,
-                    cpu_threads=CPU_THREADS,
+                    cpu_threads=CPU_THREADS,      # documented CPU threads
                     lang=OCR_LANG,
                     layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
                     text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
@@ -113,32 +94,27 @@ def get_pipeline():
                     text_det_limit_type=TEXT_DET_LIMIT_TYPE,
                     text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
                     text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-                    use_doc_unwarping=USE_DOC_UNWARPING,
-                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,  # defaults False in docs
+                    use_doc_unwarping=USE_DOC_UNWARPING,                          # defaults False in docs
+                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,            # defaults False in docs
                     use_table_recognition=USE_TABLE_RECOGNITION,
                     use_formula_recognition=USE_FORMULA_RECOGNITION,
                     use_chart_recognition=USE_CHART_RECOGNITION,
                 )
     return _pp
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ = get_pipeline()
     yield
 
-
 app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
-
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-
 def _normalize_to_list(obj):
-    """Convert pipeline output to list of result items."""
     if obj is None:
         return []
     if isinstance(obj, (list, tuple)):
@@ -147,7 +123,6 @@ def _normalize_to_list(obj):
         return list(obj)
     except TypeError:
         return [obj]
-
 
 @app.post("/parse")
 async def parse_endpoint(
@@ -202,7 +177,6 @@ async def parse_endpoint(
             items = _normalize_to_list(output)
 
             if ofmt == "json":
-                # Extract JSON from each result item
                 docs = []
                 for res in items:
                     if hasattr(res, "json"):
@@ -215,38 +189,22 @@ async def parse_endpoint(
                         docs.append(str(res))
                 results.append({"filename": f.filename, "documents": docs})
             else:
-                # Extract markdown from each result item (res.markdown is a dict)
-                md_pages = []
+                md_docs = []
                 for res in items:
+                    md = None
                     if hasattr(res, "markdown"):
-                        # res.markdown is a dict with 'markdown_texts' and 'markdown_images'
-                        md_pages.append(res.markdown)
+                        md = res.markdown
                     elif hasattr(res, "to_markdown"):
-                        txt = res.to_markdown()
-                        md_pages.append({"markdown_texts": txt, "markdown_images": {}})
+                        md = res.to_markdown()
                     else:
-                        md_pages.append({"markdown_texts": str(res), "markdown_images": {}})
-
-                # Use the pipeline's concatenate_markdown_pages to merge all pages
-                try:
-                    merged_md = pp.concatenate_markdown_pages(md_pages)
-                except Exception:
-                    # Fallback if concatenation fails
-                    merged_md = "\n\n".join(
-                        page.get("markdown_texts", str(page)) if isinstance(page, dict) else str(page)
-                        for page in md_pages
-                    )
-                
-                results.append({"filename": f.filename, "documents_markdown": [merged_md]})
+                        md = str(res)
+                    md_docs.append(md)
+                results.append({"filename": f.filename, "documents_markdown": md_docs})
 
         if ofmt == "json":
             return JSONResponse({"results": results})
 
-        # Concatenate all files' markdown
-        body = "\n\n".join(
-            f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) 
-            for item in results
-        )
+        body = "\n\n".join(f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) for item in results)
         return PlainTextResponse(body, media_type="text/markdown")
 
     finally:
