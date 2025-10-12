@@ -1,24 +1,23 @@
 FROM python:3.11-slim
 
-ENV DEBIAN_FRONTEND=noninteractive
+# Noninteractive apt to avoid debconf warnings
+ENV DEBIAN_FRONTEND=noninteractive \
+    DEBCONF_NONINTERACTIVE_SEEN=true \
+    DEBCONF_NOWARNINGS=yes
 
-# Install runtime dependencies + build tools (needed for some native extensions)
+# Latest GL/GUI libs commonly required by CV backends used by PaddleOCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
-    libopenblas0 libgfortran5 libgomp1 \
-    build-essential g++ && \
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 wget && \
     rm -rf /var/lib/apt/lists/*
 
-# Install from PyPI (has ARM64 wheels for most packages)
-RUN python -m pip install --no-cache-dir -U pip && \
-    python -m pip install --no-cache-dir \
-        paddlepaddle==3.2.0 \
-        "paddlex[ocr]==3.2.*" && \
-    python -m pip install --no-cache-dir \
-        fastapi uvicorn[standard] python-multipart && \
-    apt-get purge -y build-essential g++ && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+# Disable MKLDNN at framework level for CPU stability on ARM
+ENV FLAGS_use_mkldnn=0
+
+# Latest pip + Paddle CPU wheel from official CPU index (Armv8/aarch64 supported),
+# plus PaddleOCR (doc-parser), FastAPI, Uvicorn, and python-multipart
+RUN python -m pip install --no-cache-dir -U pip --root-user-action=ignore \
+ && python -m pip install --no-cache-dir paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ --root-user-action=ignore \
+ && python -m pip install --no-cache-dir "paddleocr[doc-parser]" fastapi uvicorn[standard] python-multipart --root-user-action=ignore
 
 WORKDIR /app
 COPY app /app/app
