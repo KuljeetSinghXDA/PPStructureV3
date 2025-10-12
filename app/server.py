@@ -9,9 +9,6 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", 
 # (Will be mirrored into the pipeline init below)
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
 
-# Optional noise reduction and GC tuning
-os.environ.setdefault("GLOG_minloglevel", "2")
-os.environ.setdefault("FLAGS_eager_delete_tensor_gb", "0.0")
 
 # -----------------------------------------------------------------------
 
