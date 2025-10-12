@@ -1,22 +1,27 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgl1 libgomp1 libglib2.0-0 poppler-utils
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
+    libopenblas0 libgfortran5 libgomp1 \
+    build-essential g++ wget && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m appuser
+# Install PaddlePaddle official ARM64 CPU wheel
+RUN python -m pip install --no-cache-dir -U pip && \
+    python -m pip install --no-cache-dir \
+        paddlepaddle==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
+    python -m pip install --no-cache-dir "paddlex[ocr]==3.2.*" && \
+    python -m pip install --no-cache-dir \
+        fastapi uvicorn[standard] python-multipart && \
+    apt-get purge -y build-essential g++ && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
-WORKDIR /opt/app
+WORKDIR /app
+COPY app /app/app
 
-COPY requirements.txt /opt/app/
-RUN pip install --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
-
-COPY . /opt/app/
-RUN chown -R appuser:appuser /opt/app
-USER appuser
-
-RUN python app/server.py
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+EXPOSE 8000
+CMD ["uvicorn","app.server:app","--host","0.0.0.0","--port","8000","--workers","1"]
