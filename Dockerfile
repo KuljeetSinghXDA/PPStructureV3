@@ -19,8 +19,6 @@ RUN python -m pip install --no-cache-dir -U pip && \
     python -m pip install --no-cache-dir -r /paddle/python/requirements.txt && \
     python -m pip install --no-cache-dir "protobuf==3.20.2"
 
-# **CRITICAL FIX**: Always start with a clean build directory
-RUN rm -rf /paddle/build && mkdir /paddle/build
 WORKDIR /paddle/build
 
 # **CRITICAL FIX**: Add WITH_SPARSE_TENSOR=OFF
