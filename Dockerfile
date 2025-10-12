@@ -51,7 +51,7 @@ RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*.whl /wheel/
 # ===== Stage 2: Runtime =====
 FROM python:3.11-slim
 
-# Install runtime libs + temporary build tools for native extensions
+# Install runtime libs + temporary build tools for native extensions (e.g., lanms-neo)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
     libopenblas0 libgfortran5 libgomp1 \
@@ -67,7 +67,7 @@ RUN python -m pip install --no-cache-dir -U pip && \
     # 2) Install PaddleOCR/PaddleX without dependencies to prevent Paddle replacement
     python -m pip install --no-cache-dir --no-deps "paddleocr==3.2.*" && \
     python -m pip install --no-cache-dir --no-deps "paddlex==3.2.*" && \
-    # 3) Manually satisfy paddlex[ocr] extras completely (per official requirements)
+    # 3) Manually satisfy paddlex[ocr] extra packages (no paddlepaddle here)
     python -m pip install --no-cache-dir \
         opencv-python-headless opencv-contrib-python \
         pillow pyyaml shapely scikit-image imgaug \
