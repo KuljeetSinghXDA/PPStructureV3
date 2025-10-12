@@ -1,8 +1,7 @@
-# ===== Stage 1: Build PaddlePaddle 3.2 (CPU) =====
+# ===== Stage 1: Build PaddlePaddle (CPU-only, ARM64, Inference-Only) =====
 FROM python:3.11-slim AS paddle-builder
-ARG PY_VERSION=3.11
-ENV DEBIAN_FRONTEND=noninteractive
 
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git build-essential cmake ninja-build patchelf pkg-config \
     protobuf-compiler libprotobuf-dev \
@@ -11,39 +10,52 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /paddle
+# Pin Paddle to 3.2 stable
 RUN git clone --depth 1 --branch release/3.2 https://github.com/PaddlePaddle/Paddle.git . && \
     git submodule update --init --recursive
 
-# Per compile docs: install python deps and protobuf 3.20.x before CMake
+# Build deps
 RUN python -m pip install --no-cache-dir -U pip && \
-    python -m pip install --no-cache-dir -r /paddle/python/requirements.txt && \
-    python -m pip install --no-cache-dir "protobuf==3.20.2"
+    python -m pip install --no-cache-dir -r /paddle/python/requirements.txt
 
+# Clean build dir and configure hardened CPU/ARM inference build
 RUN rm -rf /paddle/build && mkdir /paddle/build
 WORKDIR /paddle/build
-
-# CPU build per official instructions (PY_VERSION must match Python)
 RUN cmake .. -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DWITH_GPU=OFF \
-  -DWITH_PYTHON=ON -DPY_VERSION=${PY_VERSION}
+  -DWITH_GPU=OFF -DWITH_XPU=OFF -DWITH_TENSORRT=OFF \
+  -DWITH_MKL=OFF -DWITH_SYSTEM_BLAS=ON -DWITH_OPENBLAS=ON \
+  -DWITH_MKLDNN=OFF -DWITH_ONEDNN=OFF \
+  -DWITH_ARM=ON -DWITH_AVX=OFF -DWITH_XBYAK=OFF \
+  -DWITH_PIR=OFF -DWITH_DISTRIBUTE=OFF -DWITH_SPARSE_TENSOR=OFF \
+  -DWITH_CUSTOM_DEVICE=OFF -DWITH_CINN=OFF -DWITH_PSCORE=OFF \
+  -DWITH_HETERPS=OFF -DWITH_GLOO=OFF -DWITH_PSLIB=OFF \
+  -DWITH_CUDNN_FRONTEND=OFF -DWITH_FLASH_ATTENTION=OFF \
+  -DWITH_CUTLASS=OFF -DWITH_NCCL=OFF -DWITH_RCCL=OFF \
+  -DWITH_BRPC=OFF -DWITH_INFERENCE_API_TEST=OFF \
+  -DWITH_SHARED_PHI=OFF -DWITH_CRYPTO=OFF \
+  -DWITH_ARM_BRPC=OFF -DWITH_LITE=OFF -DWITH_XPU_BKCL=OFF \
+  -DWITH_STRIP=ON -DWITH_UNITY_BUILD=OFF \
+  -DWITH_PYTHON=ON -DPY_VERSION=3.11 \
+  -DWITH_TESTING=OFF -DON_INFER=ON
 
-RUN ninja -j2 && ls -lah /paddle/build/python/dist
+ARG BUILD_JOBS=2
+RUN ninja -j${BUILD_JOBS} && ls -lah /paddle/build/python/dist
 RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*.whl /wheel/
 
-# ===== Stage 2: Runtime with compiled Paddle + PaddleOCR =====
+# ===== Stage 2: Runtime =====
 FROM python:3.11-slim
 
-# No defaults here; all runtime values are provided via env at deploy time
-WORKDIR /app
-COPY --from=paddle-builder /wheel /tmp/wheel
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install Paddle 3.2 wheel and PaddleOCR (official quick start)
+COPY --from=paddle-builder /wheel /tmp/wheel
 RUN python -m pip install --no-cache-dir -U pip && \
     python -m pip install --no-cache-dir /tmp/wheel/*.whl && \
-    python -m pip install --no-cache-dir "paddleocr[all]"
+    python -m pip install --no-cache-dir "paddleocr==3.2" fastapi uvicorn[standard] python-multipart
 
-# App code
+WORKDIR /app
 COPY app /app/app
 
 EXPOSE 8000
