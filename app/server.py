@@ -3,16 +3,17 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from typing import List, Literal, Optional
 from pathlib import Path
 from contextlib import asynccontextmanager
-import os, tempfile, threading, json, glob, shutil
+import os, tempfile, threading, json
 from paddleocr import PPStructureV3
 
-# All configuration via environment variables
+# Environment-driven configuration
 DEVICE = os.getenv("DEVICE", "cpu")
 OCR_LANG = os.getenv("OCR_LANG", "en")
 CPU_THREADS = int(os.getenv("CPU_THREADS", "1"))
 ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
+ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
 
-# Optional features defaulted off for stability; toggle from Dokploy
+# Optional features (default off for stability)
 USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
 USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
 USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
@@ -20,7 +21,7 @@ USE_TABLE_RECOGNITION = os.getenv("USE_TABLE_RECOGNITION", "true").lower() == "t
 USE_FORMULA_RECOGNITION = os.getenv("USE_FORMULA_RECOGNITION", "false").lower() == "true"
 USE_CHART_RECOGNITION = os.getenv("USE_CHART_RECOGNITION", "false").lower() == "true"
 
-# Model names (None = auto per docs)
+# Model names (None means auto selection as per docs)
 LAYOUT_DETECTION_MODEL_NAME = os.getenv("LAYOUT_DETECTION_MODEL_NAME") or None
 TEXT_DETECTION_MODEL_NAME = os.getenv("TEXT_DETECTION_MODEL_NAME") or None
 TEXT_RECOGNITION_MODEL_NAME = os.getenv("TEXT_RECOGNITION_MODEL_NAME") or None
@@ -43,7 +44,7 @@ TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "1"))
 ALLOWED_EXTENSIONS = set(ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(","))
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 
-# Thread caps before model init
+# Cap native threads before model init
 os.environ.setdefault("OMP_NUM_THREADS", str(CPU_THREADS))
 os.environ.setdefault("OPENBLAS_NUM_THREADS", str(CPU_THREADS))
 os.environ.setdefault("FLAGS_use_mkldnn", "1" if ENABLE_MKLDNN else "0")
@@ -60,6 +61,7 @@ def get_pipeline():
                 _pp = PPStructureV3(
                     device=DEVICE,
                     enable_mkldnn=ENABLE_MKLDNN,
+                    enable_hpi=ENABLE_HPI,
                     cpu_threads=CPU_THREADS,
                     lang=OCR_LANG,
                     layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
@@ -86,12 +88,6 @@ def get_pipeline():
                     use_chart_recognition=USE_CHART_RECOGNITION,
                 )
     return _pp
-
-def run_pps_v3(pipeline, input_path: str):
-    # Follow documented API: pipeline.predict(input=...) and result save methods as needed
-    if hasattr(pipeline, "predict"):
-        return pipeline.predict(input=input_path)
-    return pipeline(input_path)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -145,50 +141,51 @@ async def parse_endpoint(
                 raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
             pp = get_pipeline()
-            out = run_pps_v3(pp, tmp_path)  # documented predict path
-            # Per docs: res.save_to_json/save_to_markdown; for PDFs, concatenate_markdown_pages
-            tmpdir = tempfile.mkdtemp(prefix="ppsv3_res_")
-            tmpdirs.append(tmpdir)
+            try:
+                # Predict returns a SINGLE result object per docs
+                result = pp.predict(input=tmp_path)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
+
+            outdir = tempfile.mkdtemp(prefix="ppsv3_res_")
+            tmpdirs.append(outdir)
 
             if ofmt == "json":
-                # Save all page results then read them back to return JSON
-                for res in out:
-                    res.save_to_json(save_path=tmpdir)
-                page_jsons = []
-                for jf in sorted(glob.glob(os.path.join(tmpdir, "*.json"))):
+                # Save result to JSON then read back
+                result.save_to_json(save_path=outdir)
+                json_files = sorted([os.path.join(outdir, jf) for jf in os.listdir(outdir) if jf.endswith('.json')])
+                doc_data = []
+                for jf in json_files:
                     try:
                         with open(jf, "r", encoding="utf-8") as fh:
-                            page_jsons.append(json.load(fh))
+                            doc_data.append(json.load(fh))
                     except Exception:
                         pass
-                results.append({"filename": f.filename, "documents": page_jsons})
+                results.append({"filename": f.filename, "documents": doc_data if doc_data else [vars(result)]})
             else:
-                # Markdown: if PDF, concatenate pages using documented helper
-                is_pdf = suffix == ".pdf"
-                if is_pdf and hasattr(pp, "concatenate_markdown_pages"):
-                    md_list = []
-                    md_images = []
-                    for res in out:
-                        md_info = res.markdown
-                        md_list.append(md_info)
-                        md_images.append(md_info.get("markdown_images", {}) if isinstance(md_info, dict) else {})
-                    combined_md = pp.concatenate_markdown_pages(md_list)
-                    results.append({"filename": f.filename, "documents_markdown": [combined_md]})
+                # Access markdown attribute directly per docs
+                if hasattr(result, 'markdown'):
+                    md_content = result.markdown
+                elif hasattr(result, 'to_markdown'):
+                    md_content = result.to_markdown()
                 else:
-                    # Image or no helper: save each page markdown then read back
-                    for res in out:
-                        res.save_to_markdown(save_path=tmpdir)
-                    md_docs = []
-                    for mf in sorted(glob.glob(os.path.join(tmpdir, "*.md"))):
+                    # Fallback: save to markdown and read
+                    result.save_to_markdown(save_path=outdir)
+                    md_files = sorted([os.path.join(outdir, mf) for mf in os.listdir(outdir) if mf.endswith('.md')])
+                    md_texts = []
+                    for mf in md_files:
                         try:
                             with open(mf, "r", encoding="utf-8") as fh:
-                                md_docs.append(fh.read())
+                                md_texts.append(fh.read())
                         except Exception:
                             pass
-                    results.append({"filename": f.filename, "documents_markdown": md_docs})
+                    md_content = "\n\n".join(md_texts) if md_texts else str(result)
+                
+                results.append({"filename": f.filename, "documents_markdown": [md_content]})
 
         if ofmt == "json":
             return JSONResponse({"results": results})
+
         body = "\n\n".join(f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) for item in results)
         return PlainTextResponse(body, media_type="text/markdown")
 
@@ -199,4 +196,8 @@ async def parse_endpoint(
             except FileNotFoundError:
                 pass
         for d in tmpdirs:
-            shutil.rmtree(d, ignore_errors=True)
+            try:
+                import shutil
+                shutil.rmtree(d, ignore_errors=True)
+            except:
+                pass
