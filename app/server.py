@@ -1,19 +1,9 @@
 import os
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
-os.environ.setdefault("FLAGS_use_mkldnn", "0")
-os.environ.setdefault("GLOG_minloglevel", "2")
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from paddleocr import PPStructureV3
 import tempfile, json
-
-DEVICE = os.getenv("DEVICE", "cpu")
-OCR_LANG = os.getenv("OCR_LANG", "en")
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 
 _pipeline = None
 def get_pipeline():
