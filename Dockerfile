@@ -64,10 +64,9 @@ COPY --from=paddle-builder /wheel /tmp/wheel
 RUN python -m pip install --no-cache-dir -U pip && \
     # 1) Install custom ARM64 Paddle wheel first
     python -m pip install --no-cache-dir /tmp/wheel/*.whl && \
-    # 2) Install PaddleOCR/PaddleX without dependencies to prevent Paddle replacement
+    # 2) Install PaddleOCR without dependencies
     python -m pip install --no-cache-dir --no-deps "paddleocr==3.2.*" && \
-    python -m pip install --no-cache-dir --no-deps "paddlex==3.2.*" && \
-    # 3) Install PaddleX core dependencies (from error messages)
+    # 3) Install PaddleX core dependencies first
     python -m pip install --no-cache-dir \
         "aistudio_sdk>=0.3.5" \
         chardet \
@@ -79,7 +78,7 @@ RUN python -m pip install --no-cache-dir -U pip && \
         ruamel.yaml \
         ujson \
         "PyYAML==6.0.2" && \
-    # 4) Install paddlex[ocr] extras
+    # 4) Install paddlex[ocr] extras dependencies manually
     python -m pip install --no-cache-dir \
         opencv-python-headless opencv-contrib-python \
         pillow shapely scikit-image imgaug \
@@ -89,13 +88,15 @@ RUN python -m pip install --no-cache-dir -U pip && \
         ftfy imagesize lxml openpyxl premailer \
         scikit-learn tokenizers==0.19.1 \
         onnx onnxruntime matplotlib requests typing_extensions && \
-    # 5) Install FastAPI stack
+    # 5) NOW install PaddleX with [ocr] extra to register metadata (won't reinstall paddlepaddle)
+    python -m pip install --no-cache-dir "paddlex[ocr]==3.2.*" && \
+    # 6) Install FastAPI stack
     python -m pip install --no-cache-dir fastapi uvicorn[standard] python-multipart && \
-    # 6) Verify installation integrity
+    # 7) Verify installation integrity
     python -c "import paddle; print('✓ Paddle version:', paddle.__version__); print('✓ Paddle path:', paddle.__file__)" && \
     python -c "import paddleocr; print('✓ PaddleOCR imported successfully')" && \
     python -c "import paddlex; print('✓ PaddleX imported successfully')" && \
-    # 7) Clean up build tools to reduce image size
+    # 8) Clean up build tools to reduce image size
     apt-get purge -y build-essential g++ && \
     apt-get autoremove -y && \
     rm -rf /tmp/wheel /var/lib/apt/lists/*
