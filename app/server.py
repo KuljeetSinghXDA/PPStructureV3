@@ -74,9 +74,9 @@ def get_pipeline():
             if _pp is None:
                 _pp = PPStructureV3(
                     device=DEVICE,
-                    enable_mkldnn=ENABLE_MKLDNN,  # documented CPU accel flag
+                    enable_mkldnn=ENABLE_MKLDNN,
                     enable_hpi=ENABLE_HPI,
-                    cpu_threads=CPU_THREADS,      # documented CPU threads
+                    cpu_threads=CPU_THREADS,
                     lang=OCR_LANG,
                     layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
                     text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
@@ -94,9 +94,9 @@ def get_pipeline():
                     text_det_limit_type=TEXT_DET_LIMIT_TYPE,
                     text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
                     text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,  # defaults False in docs
-                    use_doc_unwarping=USE_DOC_UNWARPING,                          # defaults False in docs
-                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,            # defaults False in docs
+                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+                    use_doc_unwarping=USE_DOC_UNWARPING,
+                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,
                     use_table_recognition=USE_TABLE_RECOGNITION,
                     use_formula_recognition=USE_FORMULA_RECOGNITION,
                     use_chart_recognition=USE_CHART_RECOGNITION,
@@ -115,6 +115,7 @@ def health():
     return {"status": "ok"}
 
 def _normalize_to_list(obj):
+    """Convert predict output to list of result items."""
     if obj is None:
         return []
     if isinstance(obj, (list, tuple)):
@@ -123,6 +124,19 @@ def _normalize_to_list(obj):
         return list(obj)
     except TypeError:
         return [obj]
+
+def _extract_markdown_text(md_obj):
+    """Extract markdown text string from result object or dict."""
+    if isinstance(md_obj, str):
+        return md_obj
+    if isinstance(md_obj, dict):
+        # If markdown dict has 'text' key, use that
+        if 'text' in md_obj:
+            return md_obj['text']
+        # Otherwise convert the whole dict to JSON-formatted string
+        return json.dumps(md_obj, ensure_ascii=False, indent=2)
+    # Fallback: convert to string
+    return str(md_obj)
 
 @app.post("/parse")
 async def parse_endpoint(
@@ -183,28 +197,33 @@ async def parse_endpoint(
                         docs.append(res.json)
                     elif hasattr(res, "to_dict"):
                         docs.append(res.to_dict())
+                    elif isinstance(res, dict):
+                        docs.append(res)
                     elif hasattr(res, "__dict__"):
                         docs.append({k: getattr(res, k) for k in vars(res)})
                     else:
-                        docs.append(str(res))
+                        docs.append({"raw": str(res)})
                 results.append({"filename": f.filename, "documents": docs})
             else:
                 md_docs = []
                 for res in items:
-                    md = None
+                    md_text = None
                     if hasattr(res, "markdown"):
-                        md = res.markdown
+                        md_text = _extract_markdown_text(res.markdown)
                     elif hasattr(res, "to_markdown"):
-                        md = res.to_markdown()
+                        md_text = _extract_markdown_text(res.to_markdown())
                     else:
-                        md = str(res)
-                    md_docs.append(md)
+                        md_text = str(res)
+                    md_docs.append(md_text)
                 results.append({"filename": f.filename, "documents_markdown": md_docs})
 
         if ofmt == "json":
             return JSONResponse({"results": results})
 
-        body = "\n\n".join(f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) for item in results)
+        body = "\n\n".join(
+            f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) 
+            for item in results
+        )
         return PlainTextResponse(body, media_type="text/markdown")
 
     finally:
