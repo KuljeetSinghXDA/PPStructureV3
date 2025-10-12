@@ -7,7 +7,14 @@ import shutil
 from pathlib import Path
 from typing import List, Literal, Optional
 from contextlib import asynccontextmanager
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.concurrency import run_in_threadpool
 
+from paddleocr import PPStructureV3  # import after envs are applied
+
+
+# ================= Core Configuration =================
 # Threading caps to avoid nested parallelism and dueling thread pools
 os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "1"))
 os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
@@ -22,18 +29,6 @@ os.environ.setdefault("FLAGS_use_mkldnn", "0")
 # Optional noise reduction and GC tuning
 os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("FLAGS_eager_delete_tensor_gb", "0.0")
-
-# -----------------------------------------------------------------------
-
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.concurrency import run_in_threadpool
-
-from paddleocr import PPStructureV3  # import after envs are applied
-
-
-# ================= Core Configuration =================
-
 DEVICE = os.getenv("DEVICE", "cpu")
 OCR_LANG = os.getenv("OCR_LANG", "en")
 
