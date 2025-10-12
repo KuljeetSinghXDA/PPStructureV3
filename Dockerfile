@@ -1,108 +1,22 @@
-# ===== Stage 1: Build PaddlePaddle (CPU-only, ARM64, Inference-Only) =====
-FROM python:3.11-slim AS paddle-builder
+FROM python:3.10-slim
 
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git build-essential cmake ninja-build patchelf pkg-config \
-    protobuf-compiler libprotobuf-dev \
-    python3-dev libopenblas-dev liblapack-dev gfortran \
-    ca-certificates wget unzip && \
-    rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
 
-WORKDIR /paddle
-# Pin Paddle to 3.2 stable
-RUN git clone --depth 1 --branch release/3.2 https://github.com/PaddlePaddle/Paddle.git . && \
-    git submodule update --init --recursive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libgomp1 libglib2.0-0 poppler-utils
 
-# Build deps
-RUN python -m pip install --no-cache-dir -U pip && \
-    python -m pip install --no-cache-dir -r /paddle/python/requirements.txt
+RUN useradd -m appuser
 
-# Clean build dir and configure hardened CPU/ARM inference build
-RUN rm -rf /paddle/build && mkdir /paddle/build
-WORKDIR /paddle/build
-RUN cmake .. -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_SYSTEM_NAME=Linux \
-  -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-  -DON_INFER=ON \
-  -DWITH_STATIC_LIB=OFF \
-  -DWITH_PIR=OFF -DPADDLE_WITH_PIR=OFF -DPIR_FULL=OFF \
-  -DWITH_SPARSE_TENSOR=OFF \
-  -DWITH_GPU=OFF -DWITH_XPU=OFF -DWITH_TENSORRT=OFF \
-  -DWITH_MKL=OFF -DWITH_SYSTEM_BLAS=ON -DWITH_OPENBLAS=ON \
-  -DWITH_MKLDNN=OFF -DWITH_ONEDNN=OFF \
-  -DWITH_ARM=ON -DWITH_AVX=OFF -DWITH_XBYAK=OFF \
-  -DWITH_DISTRIBUTE=OFF -DWITH_BRPC=OFF -DWITH_PSCORE=OFF -DWITH_GLOO=OFF \
-  -DWITH_CINN=OFF -DWITH_CUDNN_FRONTEND=OFF -DWITH_CUTLASS=OFF -DWITH_FLASH_ATTENTION=OFF \
-  -DWITH_NCCL=OFF -DWITH_RCCL=OFF \
-  -DWITH_CUSTOM_DEVICE=OFF -DWITH_HETERPS=OFF -DWITH_PSLIB=OFF \
-  -DWITH_ARM_BRPC=OFF -DWITH_XPU_BKCL=OFF \
-  -DWITH_INFERENCE_API_TEST=OFF -DWITH_TESTING=OFF \
-  -DWITH_SHARED_PHI=OFF -DWITH_CRYPTO=OFF \
-  -DWITH_LITE=OFF \
-  -DWITH_STRIP=ON -DWITH_UNITY_BUILD=OFF \
-  -DWITH_PYTHON=ON -DPY_VERSION=3.11
+WORKDIR /opt/app
 
-ARG BUILD_JOBS=4
-RUN ninja -j${BUILD_JOBS} && ls -lah /paddle/build/python/dist
-RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*.whl /wheel/
+COPY requirements.txt /opt/app/
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# ===== Stage 2: Runtime =====
-FROM python:3.11-slim
+COPY . /opt/app/
+RUN chown -R appuser:appuser /opt/app
+USER appuser
 
-# Install runtime libs + temporary build tools for native extensions
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
-    libopenblas0 libgfortran5 libgomp1 \
-    build-essential g++ && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY --from=paddle-builder /wheel /tmp/wheel
-
-# Safe install sequence preserving custom Paddle wheel
-RUN python -m pip install --no-cache-dir -U pip && \
-    # 1) Install custom ARM64 Paddle wheel first
-    python -m pip install --no-cache-dir /tmp/wheel/*.whl && \
-    # 2) Install PaddleOCR without dependencies
-    python -m pip install --no-cache-dir --no-deps "paddleocr==3.2.*" && \
-    # 3) Install PaddleX core dependencies first
-    python -m pip install --no-cache-dir \
-        "aistudio_sdk>=0.3.5" \
-        chardet \
-        colorlog \
-        "modelscope>=1.28.0" \
-        prettytable \
-        py-cpuinfo \
-        "pydantic>=2" \
-        ruamel.yaml \
-        ujson \
-        "PyYAML==6.0.2" && \
-    # 4) Install paddlex[ocr] extras dependencies manually
-    python -m pip install --no-cache-dir \
-        opencv-python-headless opencv-contrib-python \
-        pillow shapely scikit-image imgaug \
-        pyclipper lmdb tqdm numpy visualdl rapidfuzz cython \
-        lanms-neo attrdict easydict \
-        reportlab pypdf pdfminer.six PyMuPDF pypdfium2>=4 \
-        ftfy imagesize lxml openpyxl premailer \
-        scikit-learn tokenizers==0.19.1 \
-        onnx onnxruntime matplotlib requests typing_extensions && \
-    # 5) NOW install PaddleX with [ocr] extra to register metadata (won't reinstall paddlepaddle)
-    python -m pip install --no-cache-dir "paddlex[ocr]==3.2.*" && \
-    # 6) Install FastAPI stack
-    python -m pip install --no-cache-dir fastapi uvicorn[standard] python-multipart && \
-    # 7) Verify installation integrity
-    python -c "import paddle; print('✓ Paddle version:', paddle.__version__); print('✓ Paddle path:', paddle.__file__)" && \
-    python -c "import paddleocr; print('✓ PaddleOCR imported successfully')" && \
-    python -c "import paddlex; print('✓ PaddleX imported successfully')" && \
-    # 8) Clean up build tools to reduce image size
-    apt-get purge -y build-essential g++ && \
-    apt-get autoremove -y && \
-    rm -rf /tmp/wheel /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY app /app/app
-
-EXPOSE 8000
-CMD ["uvicorn","app.server:app","--host","0.0.0.0","--port","8000","--workers","1"]
+RUN python app/fetch_dependency_files.py
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
