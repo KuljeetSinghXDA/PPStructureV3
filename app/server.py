@@ -1,27 +1,53 @@
+# server.py
+
+# --- Environment must be set before any Paddle/NumPy/OpenBLAS import ---
+import os
+
+# Threading caps to avoid nested parallelism and dueling thread pools
+os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "1"))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
+
+# Pin OpenBLAS to a safe ARM core on Ampere A1
+os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
+
+# Default: disable MKLDNN on ARM unless explicitly enabled via env
+# (Will be mirrored into the pipeline init below)
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+
+# Optional noise reduction and GC tuning
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("FLAGS_eager_delete_tensor_gb", "0.0")
+
+# -----------------------------------------------------------------------
+
+import tempfile
+import threading
+import json
+import shutil
+from pathlib import Path
+from typing import List, Literal, Optional
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-from typing import List, Literal, Optional
-from pathlib import Path
-from contextlib import asynccontextmanager
-import os, tempfile, threading, json
-from paddleocr import PPStructureV3
 
-# Core configuration (all via environment)
+from paddleocr import PPStructureV3  # import after envs are applied
+
+
+# ================= Core Configuration =================
+
 DEVICE = os.getenv("DEVICE", "cpu")
 OCR_LANG = os.getenv("OCR_LANG", "en")
 
-# Paddle thread pool
+# Start conservative; scale via env after stability
 CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 
-# Independent native thread caps
-OMP_THREADS = os.getenv("OMP_NUM_THREADS", "1")
-OPENBLAS_THREADS = os.getenv("OPENBLAS_NUM_THREADS", "1")
-
+# Allow enabling later from Dokploy; default off for ARM stability
 ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
 ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
 
-# Optional features (default off for stability)
+# Optional modules
 USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
 USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
 USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
@@ -49,17 +75,21 @@ TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "max")
 TEXT_REC_SCORE_THRESH = float(os.getenv("TEXT_REC_SCORE_THRESH", "0.0"))
 TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "1"))
 
-ALLOWED_EXTENSIONS = set(ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(","))
+ALLOWED_EXTENSIONS = set(
+    ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(",")
+)
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 
-# Apply native thread caps BEFORE model init
-os.environ["OMP_NUM_THREADS"] = str(OMP_THREADS)
-os.environ["OPENBLAS_NUM_THREADS"] = str(OPENBLAS_THREADS)
-os.environ["FLAGS_use_mkldnn"] = "1" if ENABLE_MKLDNN else "0"
+# Bounded parallelism for predict on shared pipeline
+# 1 == fully serialized; raise to >1 cautiously after stability
+MAX_PARALLEL_PREDICT = int(os.getenv("MAX_PARALLEL_PREDICT", "1"))
 
-# Singleton PPStructureV3 pipeline
+# ================= Singleton Pipeline + Bounded Concurrency =================
+
 _pp = None
 _pp_lock = threading.Lock()
+_predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
+
 
 def get_pipeline():
     global _pp
@@ -97,16 +127,20 @@ def get_pipeline():
                 )
     return _pp
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ = get_pipeline()
     yield
 
+
 app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.post("/parse")
 async def parse_endpoint(
@@ -129,7 +163,7 @@ async def parse_endpoint(
             if suffix not in ALLOWED_EXTENSIONS:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Unsupported file type: {suffix}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+                    detail=f"Unsupported file type: {suffix}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
                 )
 
             fd, tmp_path = tempfile.mkstemp(prefix="ppsv3_", suffix=suffix, dir="/tmp")
@@ -148,14 +182,17 @@ async def parse_endpoint(
                 raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
             pp = get_pipeline()
+
+            def _predict(path: str):
+                with _predict_sem:
+                    return pp.predict(input=path)
+
             try:
-                # Minimal patch: offload CPU-bound inference to a threadpool
-                result = await run_in_threadpool(pp.predict, input=tmp_path)
+                result = await run_in_threadpool(_predict, tmp_path)
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
 
             if ofmt == "json":
-                # Prefer SDK serialization; fallback to vars()
                 outdir = tempfile.mkdtemp(prefix="ppsv3_json_")
                 try:
                     if hasattr(result, "save_to_json"):
@@ -169,7 +206,6 @@ async def parse_endpoint(
                     else:
                         results.append({"filename": f.filename, "documents": [vars(result)]})
                 finally:
-                    import shutil
                     shutil.rmtree(outdir, ignore_errors=True)
             else:
                 md_body = None
@@ -191,7 +227,6 @@ async def parse_endpoint(
                         else:
                             md_body = str(result)
                     finally:
-                        import shutil
                         shutil.rmtree(outdir, ignore_errors=True)
                 results.append({"filename": f.filename, "documents_markdown": [md_body]})
 
