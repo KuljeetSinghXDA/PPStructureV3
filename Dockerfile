@@ -22,7 +22,7 @@ RUN python -m pip install --no-cache-dir -U pip && \
 RUN rm -rf /paddle/build && mkdir /paddle/build
 WORKDIR /paddle/build
 RUN cmake .. -G Ninja \
--DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_SYSTEM_NAME=Linux \
   -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
   -DON_INFER=ON \
@@ -48,18 +48,35 @@ ARG BUILD_JOBS=4
 RUN ninja -j${BUILD_JOBS} && ls -lah /paddle/build/python/dist
 RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*.whl /wheel/
 
-# ===== Stage 2: Runtime =====
+# ===== Stage 2: Runtime (UPDATED) =====
 FROM python:3.11-slim
 
+# Runtime math/libs required by your Paddle wheel
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 && \
-    rm -rf /var/lib/apt/lists/*
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
+    libopenblas0 libgfortran5 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=paddle-builder /wheel /tmp/wheel
+
 RUN python -m pip install --no-cache-dir -U pip && \
+    # 1) Install your custom ARM64 Paddle wheel
     python -m pip install --no-cache-dir /tmp/wheel/*.whl && \
-    python -m pip install --no-cache-dir "paddlex[ocr]==3.2.*" && \
-    python -m pip install --no-cache-dir "paddleocr==3.2.*" fastapi uvicorn[standard] python-multipart
+    # 2) Install PaddleOCR without dependencies to avoid replacing Paddle
+    python -m pip install --no-cache-dir --no-deps "paddleocr==3.2.*" && \
+    # 3) Install PaddleX without dependencies (needed by PPStructureV3 internals)
+    python -m pip install --no-cache-dir --no-deps "paddlex==3.2.*" && \
+    # 4) Manually satisfy paddlex[ocr] extra packages (no paddlepaddle here)
+    python -m pip install --no-cache-dir \
+        opencv-python-headless opencv-contrib-python \
+        pillow pyyaml shapely scikit-image imgaug \
+        pyclipper lmdb tqdm numpy visualdl rapidfuzz cython \
+        lanms-neo attrdict easydict \
+        reportlab pypdf pdfminer.six PyMuPDF \
+        onnx onnxruntime matplotlib requests typing_extensions && \
+    # 5) API stack
+    python -m pip install --no-cache-dir fastapi uvicorn[standard] python-multipart && \
+    rm -rf /tmp/wheel
 
 WORKDIR /app
 COPY app /app/app
