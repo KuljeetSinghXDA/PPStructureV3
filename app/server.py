@@ -68,9 +68,6 @@ ALLOWED_EXTENSIONS = set(
 )
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 
-# Bounded parallelism for predict on shared pipeline
-# 1 == fully serialized; raise to >1 cautiously after stability
-MAX_PARALLEL_PREDICT = int(os.getenv("MAX_PARALLEL_PREDICT", "1"))
 
 # ================= Singleton Pipeline + Bounded Concurrency =================
 
