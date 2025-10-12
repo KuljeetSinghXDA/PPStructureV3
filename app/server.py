@@ -18,7 +18,6 @@ from paddleocr import PPStructureV3  # import after envs are applied
 
 _pp = None
 _pp_lock = threading.Lock()
-_predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
 
 
 @asynccontextmanager
