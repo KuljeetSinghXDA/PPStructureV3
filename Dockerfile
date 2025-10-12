@@ -1,5 +1,5 @@
 # ===== Stage 1: Build PaddlePaddle (CPU-only, ARM64, Inference-Only) =====
-FROM python:3.11-slim AS paddle-builder
+FROM python:3.12-slim AS paddle-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -38,7 +38,7 @@ RUN cmake .. -G Ninja \
   -DWITH_SHARED_PHI=OFF -DWITH_CRYPTO=OFF \
   -DWITH_ARM_BRPC=OFF -DWITH_LITE=OFF -DWITH_XPU_BKCL=OFF \
   -DWITH_STRIP=ON -DWITH_UNITY_BUILD=OFF \
-  -DWITH_PYTHON=ON -DPY_VERSION=3.11 \
+  -DWITH_PYTHON=ON -DPY_VERSION=3.12 \
   -DWITH_TESTING=OFF -DON_INFER=ON
 
 # Build with low parallelism to avoid OOM on smaller VMs
@@ -48,7 +48,7 @@ RUN ninja -j${BUILD_JOBS} && ls -lah /paddle/build/python/dist
 RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*.whl /wheel/
 
 # ===== Stage 2: Runtime with compiled Paddle + PaddleOCR API =====
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Minimal runtime libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
