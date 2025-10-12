@@ -5,10 +5,6 @@ import os
 os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "1"))
 os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
 
-# Default: disable MKLDNN on ARM unless explicitly enabled via env
-# (Will be mirrored into the pipeline init below)
-os.environ.setdefault("FLAGS_use_mkldnn", "0")
-
 
 # -----------------------------------------------------------------------
 
