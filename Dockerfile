@@ -11,13 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /paddle
 # Pin to the latest stable release branch (3.2)
-RUN git clone --depth 1 --branch release/3.2 https://github.com/PaddlePaddle/Paddle.git . && \
+RUN git clone --depth 1 https://github.com/PaddlePaddle/Paddle.git . && \
     git submodule update --init --recursive
 
 # Install Python build dependencies
 RUN python -m pip install --no-cache-dir -U pip && \
     python -m pip install --no-cache-dir -r /paddle/python/requirements.txt && \
-    python -m pip install --no-cache-dir "protobuf==3.20.2"
 
 WORKDIR /paddle/build
 
