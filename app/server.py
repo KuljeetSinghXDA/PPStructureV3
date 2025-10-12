@@ -142,7 +142,10 @@ async def parse_endpoint(
                 raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
             pp = get_pipeline()
-            res = run_pps_v3(pp, tmp_path)
+            try:
+                res = run_pps_v3(pp, tmp_path)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
 
             if ofmt == "markdown":
                 md = to_markdown(res)
@@ -151,7 +154,7 @@ async def parse_endpoint(
                 results.append({"filename": f.filename, "json": res})
 
         if ofmt == "markdown":
-            body = "\n\n".join(f"# {r['filename']}\n\n{r['markdown']}" for r in results)
+            body = "\n\n".join(f"# {r['filename']}\n\n" + r['markdown'] for r in results)
             return PlainTextResponse(body, media_type="text/markdown")
         return JSONResponse({"results": results})
     finally:
