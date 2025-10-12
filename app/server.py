@@ -1,37 +1,29 @@
-# server.py
-
-# 1) Environment variables MUST be set before importing Paddle/NumPy/OpenBLAS loaders.
-import os
-
-# Threading caps to avoid dueling thread pools and nested parallelism
-os.environ.setdefault("OMP_NUM_THREADS", "1")            # Control OpenMP threads [web:95]
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")       # Control OpenBLAS worker threads [web:93]
-
-# Pin OpenBLAS to a safe ARM core to avoid illegal instruction or segfault on ARM64
-os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")      # OCI Ampere A1 is ARMv8 class [web:85]
-
-# Disable MKLDNN/oneDNN on ARM to avoid unsupported/x86-optimized paths
-os.environ.setdefault("FLAGS_use_mkldnn", "0")           # Global Paddle flag; keep disabled on ARM [web:104]
-
-# 2) Now import everything else (PaddleOCR will load after env is applied)
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 from typing import List, Literal, Optional
 from pathlib import Path
 from contextlib import asynccontextmanager
-import tempfile, threading, json
+import os, tempfile, threading, json
 
 from paddleocr import PPStructureV3
 
-# 3) Core configuration (all via environment)
+# Core configuration (all via environment)
 DEVICE = os.getenv("DEVICE", "cpu")
 OCR_LANG = os.getenv("OCR_LANG", "en")
 
 # Paddle thread pool
 CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 
-# Optional features (default off for stability; table on by default)
+# Independent native thread caps
+# If not provided, default to 1 to avoid nested parallelism
+OMP_THREADS = os.getenv("OMP_NUM_THREADS", "1")
+OPENBLAS_THREADS = os.getenv("OPENBLAS_NUM_THREADS", "1")
+
+ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
+ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
+
+# Optional features (default off for stability)
 USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
 USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
 USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
@@ -59,15 +51,18 @@ TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "max")
 TEXT_REC_SCORE_THRESH = float(os.getenv("TEXT_REC_SCORE_THRESH", "0.0"))
 TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "1"))
 
-ALLOWED_EXTENSIONS = set(
-    ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(",")
-)
+ALLOWED_EXTENSIONS = set(ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(","))
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 
-# 4) Singleton PPStructureV3 pipeline with thread-safe predict
+# Apply native thread caps BEFORE model init
+os.environ["OMP_NUM_THREADS"] = str(OMP_THREADS)
+os.environ["OPENBLAS_NUM_THREADS"] = str(OPENBLAS_THREADS)
+# Keep MKLDNN flag in sync with env
+os.environ["FLAGS_use_mkldnn"] = "1" if ENABLE_MKLDNN else "0"
+
+# Singleton PPStructureV3 pipeline
 _pp = None
 _pp_lock = threading.Lock()
-_predict_lock = threading.Lock()  # serialize predict calls; PaddleOCR objects are not thread-safe [web:78]
 
 def get_pipeline():
     global _pp
@@ -76,8 +71,8 @@ def get_pipeline():
             if _pp is None:
                 _pp = PPStructureV3(
                     device=DEVICE,
-                    enable_mkldnn=False,  # Force off on ARM
-                    enable_hpi=False,     # Keep off unless required
+                    enable_mkldnn=ENABLE_MKLDNN,
+                    enable_hpi=ENABLE_HPI,
                     cpu_threads=CPU_THREADS,
                     lang=OCR_LANG,
                     layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
@@ -156,18 +151,14 @@ async def parse_endpoint(
                 raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
             pp = get_pipeline()
-
-            # Wrap predict in a lock to prevent concurrent access to shared Paddle objects
-            def _predict(path):
-                with _predict_lock:
-                    return pp.predict(input=path)
-
             try:
-                result = await run_in_threadpool(_predict, tmp_path)
+                # Offload the CPU-bound call to a threadpool to keep the event loop responsive
+                result = await run_in_threadpool(pp.predict, input=tmp_path)
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
 
             if ofmt == "json":
+                # Prefer structured JSON from the SDK; fall back to vars(result)
                 outdir = tempfile.mkdtemp(prefix="ppsv3_json_")
                 try:
                     if hasattr(result, "save_to_json"):
@@ -184,6 +175,7 @@ async def parse_endpoint(
                     import shutil
                     shutil.rmtree(outdir, ignore_errors=True)
             else:
+                # Markdown: use attribute if available; else serialize then read back
                 md_body = None
                 if hasattr(result, "markdown"):
                     md_body = result.markdown
