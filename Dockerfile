@@ -18,5 +18,5 @@ COPY . /opt/app/
 RUN chown -R appuser:appuser /opt/app
 USER appuser
 
-RUN python app/fetch_dependency_files.py
+RUN python app/server.py
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
