@@ -1,14 +1,4 @@
 import tempfile
-import threading
-import json
-import shutil
-from pathlib import Path
-from typing import List, Literal, Optional
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.concurrency import run_in_threadpool
 
 # --- Environment must be set before any Paddle/NumPy/OpenBLAS import ---
 import os
@@ -29,6 +19,17 @@ os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("FLAGS_eager_delete_tensor_gb", "0.0")
 
 # -----------------------------------------------------------------------
+
+import threading
+import json
+import shutil
+from pathlib import Path
+from typing import List, Literal, Optional
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.concurrency import run_in_threadpool
 
 from paddleocr import PPStructureV3  # import after envs are applied
 
@@ -79,6 +80,7 @@ ALLOWED_EXTENSIONS = set(
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 
 # Bounded parallelism for predict on shared pipeline
+# 1 == fully serialized; raise to >1 cautiously after stability
 MAX_PARALLEL_PREDICT = int(os.getenv("MAX_PARALLEL_PREDICT", "1"))
 
 # ================= Singleton Pipeline + Bounded Concurrency =================
