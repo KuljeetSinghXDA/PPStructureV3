@@ -5,6 +5,11 @@ from fastapi.responses import JSONResponse
 from paddleocr import PPStructureV3
 import tempfile, json
 
+DEVICE = os.getenv("DEVICE", "cpu")
+OCR_LANG = os.getenv("OCR_LANG", "en")
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
+
 _pipeline = None
 def get_pipeline():
     global _pipeline
