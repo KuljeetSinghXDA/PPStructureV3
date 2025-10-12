@@ -1,13 +1,14 @@
 services:
   ppstructurev3:
-    platform: linux/arm64/v8
     build:
       context: .
       dockerfile: Dockerfile
-    restart: unless-stopped
-    expose:
-      - "8000"
-    volumes:
-      - ./cache:/root/.cache
+      args:
+        PY_VERSION: "${PY_VERSION}"
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8000}:8000"
     command: >
-      uvicorn app.server:app --host 0.0.0.0 --port 8000 --workers 1
+      uvicorn app.server:app --host ${HOST} --port ${PORT} --workers ${WORKERS}
+    restart: unless-stopped
