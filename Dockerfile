@@ -58,7 +58,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=paddle-builder /wheel /tmp/wheel
 RUN python -m pip install --no-cache-dir -U pip && \
     python -m pip install --no-cache-dir /tmp/wheel/*.whl && \
-    python -m pip install --no-cache-dir "paddleocr==3.2" fastapi uvicorn[standard] python-multipart
+    python -m pip install --no-cache-dir "paddlex[ocr]==3.2.*" && \
+    python -m pip install --no-cache-dir "paddleocr==3.2.*" fastapi uvicorn[standard] python-multipart
 
 WORKDIR /app
 COPY app /app/app
