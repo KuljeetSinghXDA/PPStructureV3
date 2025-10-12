@@ -13,7 +13,6 @@ from fastapi.concurrency import run_in_threadpool
 
 from paddleocr import PPStructureV3  # import after envs are applied
 
-
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
 OCR_LANG = os.getenv("OCR_LANG", "en")
@@ -25,7 +24,7 @@ CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
 ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
 
-# Optional modules
+# Optional modules (see PaddleOCR pipeline docs)
 USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
 USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
 USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
@@ -68,7 +67,6 @@ _pp = None
 _pp_lock = threading.Lock()
 _predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
 
-
 def get_pipeline():
     global _pp
     if _pp is None:
@@ -76,9 +74,9 @@ def get_pipeline():
             if _pp is None:
                 _pp = PPStructureV3(
                     device=DEVICE,
-                    enable_mkldnn=ENABLE_MKLDNN,
+                    enable_mkldnn=ENABLE_MKLDNN,  # documented CPU accel flag
                     enable_hpi=ENABLE_HPI,
-                    cpu_threads=CPU_THREADS,
+                    cpu_threads=CPU_THREADS,      # documented CPU threads
                     lang=OCR_LANG,
                     layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
                     text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
@@ -96,29 +94,35 @@ def get_pipeline():
                     text_det_limit_type=TEXT_DET_LIMIT_TYPE,
                     text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
                     text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-                    use_doc_unwarping=USE_DOC_UNWARPING,
-                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,  # defaults False in docs
+                    use_doc_unwarping=USE_DOC_UNWARPING,                          # defaults False in docs
+                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,            # defaults False in docs
                     use_table_recognition=USE_TABLE_RECOGNITION,
                     use_formula_recognition=USE_FORMULA_RECOGNITION,
                     use_chart_recognition=USE_CHART_RECOGNITION,
                 )
     return _pp
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ = get_pipeline()
     yield
 
-
 app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
-
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+def _normalize_to_list(obj):
+    if obj is None:
+        return []
+    if isinstance(obj, (list, tuple)):
+        return list(obj)
+    try:
+        return list(obj)
+    except TypeError:
+        return [obj]
 
 @app.post("/parse")
 async def parse_endpoint(
@@ -166,47 +170,36 @@ async def parse_endpoint(
                     return pp.predict(input=path)
 
             try:
-                result = await run_in_threadpool(_predict, tmp_path)
+                output = await run_in_threadpool(_predict, tmp_path)
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
 
+            items = _normalize_to_list(output)
+
             if ofmt == "json":
-                outdir = tempfile.mkdtemp(prefix="ppsv3_json_")
-                try:
-                    if hasattr(result, "save_to_json"):
-                        result.save_to_json(save_path=outdir)
-                        docs = []
-                        for name in sorted(os.listdir(outdir)):
-                            if name.endswith(".json"):
-                                with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
-                                    docs.append(json.load(fh))
-                        results.append({"filename": f.filename, "documents": docs or [vars(result)]})
+                docs = []
+                for res in items:
+                    if hasattr(res, "json"):
+                        docs.append(res.json)
+                    elif hasattr(res, "to_dict"):
+                        docs.append(res.to_dict())
+                    elif hasattr(res, "__dict__"):
+                        docs.append({k: getattr(res, k) for k in vars(res)})
                     else:
-                        results.append({"filename": f.filename, "documents": [vars(result)]})
-                finally:
-                    shutil.rmtree(outdir, ignore_errors=True)
+                        docs.append(str(res))
+                results.append({"filename": f.filename, "documents": docs})
             else:
-                md_body = None
-                if hasattr(result, "markdown"):
-                    md_body = result.markdown
-                elif hasattr(result, "to_markdown"):
-                    md_body = result.to_markdown()
-                else:
-                    outdir = tempfile.mkdtemp(prefix="ppsv3_md_")
-                    try:
-                        if hasattr(result, "save_to_markdown"):
-                            result.save_to_markdown(save_path=outdir)
-                            parts = []
-                            for name in sorted(os.listdir(outdir)):
-                                if name.endswith(".md"):
-                                    with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
-                                        parts.append(fh.read())
-                            md_body = "\n\n".join(parts) if parts else str(result)
-                        else:
-                            md_body = str(result)
-                    finally:
-                        shutil.rmtree(outdir, ignore_errors=True)
-                results.append({"filename": f.filename, "documents_markdown": [md_body]})
+                md_docs = []
+                for res in items:
+                    md = None
+                    if hasattr(res, "markdown"):
+                        md = res.markdown
+                    elif hasattr(res, "to_markdown"):
+                        md = res.to_markdown()
+                    else:
+                        md = str(res)
+                    md_docs.append(md)
+                results.append({"filename": f.filename, "documents_markdown": md_docs})
 
         if ofmt == "json":
             return JSONResponse({"results": results})
