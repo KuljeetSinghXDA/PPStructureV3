@@ -1,23 +1,6 @@
 # --- Environment must be set before any Paddle/NumPy/OpenBLAS import ---
 import os
 
-# Threading caps to avoid nested parallelism and dueling thread pools
-os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "1"))
-os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
-
-# Pin OpenBLAS to a safe ARM core on Ampere A1
-os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
-
-# Default: disable MKLDNN on ARM unless explicitly enabled via env
-# (Will be mirrored into the pipeline init below)
-os.environ.setdefault("FLAGS_use_mkldnn", "0")
-
-# Optional noise reduction and GC tuning
-os.environ.setdefault("GLOG_minloglevel", "2")
-os.environ.setdefault("FLAGS_eager_delete_tensor_gb", "0.0")
-
-# -----------------------------------------------------------------------
-
 import tempfile
 import threading
 import json
@@ -33,97 +16,9 @@ from fastapi.concurrency import run_in_threadpool
 from paddleocr import PPStructureV3  # import after envs are applied
 
 
-# ================= Core Configuration =================
-
-DEVICE = os.getenv("DEVICE", "cpu")
-OCR_LANG = os.getenv("OCR_LANG", "en")
-
-# Start conservative; scale via env after stability
-CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
-
-# Allow enabling later from Dokploy; default off for ARM stability
-ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
-ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
-
-# Optional modules
-USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
-USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
-USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
-USE_TABLE_RECOGNITION = os.getenv("USE_TABLE_RECOGNITION", "true").lower() == "true"
-USE_FORMULA_RECOGNITION = os.getenv("USE_FORMULA_RECOGNITION", "false").lower() == "true"
-USE_CHART_RECOGNITION = os.getenv("USE_CHART_RECOGNITION", "false").lower() == "true"
-
-# Model names (None -> auto)
-LAYOUT_DETECTION_MODEL_NAME = os.getenv("LAYOUT_DETECTION_MODEL_NAME") or None
-TEXT_DETECTION_MODEL_NAME = os.getenv("TEXT_DETECTION_MODEL_NAME") or None
-TEXT_RECOGNITION_MODEL_NAME = os.getenv("TEXT_RECOGNITION_MODEL_NAME") or None
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = os.getenv("WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME") or None
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = os.getenv("WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME") or None
-TABLE_CLASSIFICATION_MODEL_NAME = os.getenv("TABLE_CLASSIFICATION_MODEL_NAME") or None
-FORMULA_RECOGNITION_MODEL_NAME = os.getenv("FORMULA_RECOGNITION_MODEL_NAME") or None
-CHART_RECOGNITION_MODEL_NAME = os.getenv("CHART_RECOGNITION_MODEL_NAME") or None
-
-# Thresholds / limits
-LAYOUT_THRESHOLD = float(os.getenv("LAYOUT_THRESHOLD", "0.5"))
-TEXT_DET_THRESH = float(os.getenv("TEXT_DET_THRESH", "0.3"))
-TEXT_DET_BOX_THRESH = float(os.getenv("TEXT_DET_BOX_THRESH", "0.6"))
-TEXT_DET_UNCLIP_RATIO = float(os.getenv("TEXT_DET_UNCLIP_RATIO", "2.0"))
-TEXT_DET_LIMIT_SIDE_LEN = int(os.getenv("TEXT_DET_LIMIT_SIDE_LEN", "960"))
-TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "max")
-TEXT_REC_SCORE_THRESH = float(os.getenv("TEXT_REC_SCORE_THRESH", "0.0"))
-TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "1"))
-
-ALLOWED_EXTENSIONS = set(
-    ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(",")
-)
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-
-# Bounded parallelism for predict on shared pipeline
-# 1 == fully serialized; raise to >1 cautiously after stability
-MAX_PARALLEL_PREDICT = int(os.getenv("MAX_PARALLEL_PREDICT", "1"))
-
-# ================= Singleton Pipeline + Bounded Concurrency =================
-
 _pp = None
 _pp_lock = threading.Lock()
 _predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
-
-
-def get_pipeline():
-    global _pp
-    if _pp is None:
-        with _pp_lock:
-            if _pp is None:
-                _pp = PPStructureV3(
-                    device=DEVICE,
-                    enable_mkldnn=ENABLE_MKLDNN,
-                    enable_hpi=ENABLE_HPI,
-                    cpu_threads=CPU_THREADS,
-                    lang=OCR_LANG,
-                    layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
-                    text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
-                    text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
-                    wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-                    wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-                    table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
-                    formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
-                    chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-                    layout_threshold=LAYOUT_THRESHOLD,
-                    text_det_thresh=TEXT_DET_THRESH,
-                    text_det_box_thresh=TEXT_DET_BOX_THRESH,
-                    text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-                    text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-                    text_det_limit_type=TEXT_DET_LIMIT_TYPE,
-                    text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
-                    text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-                    use_doc_unwarping=USE_DOC_UNWARPING,
-                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-                    use_table_recognition=USE_TABLE_RECOGNITION,
-                    use_formula_recognition=USE_FORMULA_RECOGNITION,
-                    use_chart_recognition=USE_CHART_RECOGNITION,
-                )
-    return _pp
 
 
 @asynccontextmanager
