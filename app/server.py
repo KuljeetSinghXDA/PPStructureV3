@@ -1,81 +1,209 @@
-# ===== Stage 1: Build PaddlePaddle (CPU-only, ARM64, Inference-Only) =====
-FROM python:3.11-slim AS paddle-builder
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.concurrency import run_in_threadpool
+from typing import List, Literal, Optional
+from pathlib import Path
+from contextlib import asynccontextmanager
+import os, tempfile, threading, json
+from paddleocr import PPStructureV3
 
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git build-essential cmake ninja-build patchelf pkg-config \
-    protobuf-compiler libprotobuf-dev \
-    python3-dev libopenblas-dev liblapack-dev gfortran \
-    ca-certificates wget unzip && \
-    rm -rf /var/lib/apt/lists/*
+# Core configuration (all via environment)
+DEVICE = os.getenv("DEVICE", "cpu")
+OCR_LANG = os.getenv("OCR_LANG", "en")
 
-WORKDIR /paddle
+# Paddle thread pool
+CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 
-# Clone official PaddlePaddle 3.2
-RUN git clone --depth 1 --branch release/3.2 https://github.com/PaddlePaddle/Paddle.git . && \
-    git submodule update --init --recursive
+# Independent native thread caps
+OMP_THREADS = os.getenv("OMP_NUM_THREADS", "1")
+OPENBLAS_THREADS = os.getenv("OPENBLAS_NUM_THREADS", "1")
 
-# Apply minimal patch to amp_utils.h to guard sparse calls when sparse is OFF
-RUN sed -i '/static inline paddle::Tensor Cast(/,/^}/{ \
-s/if (input\.is_sparse_coo_tensor() || input\.is_sparse_csr_tensor()) {/#ifdef PADDLE_WITH_SPARSE\
-  if (input.is_sparse_coo_tensor() || input.is_sparse_csr_tensor()) {/; \
-s/    } else {/    }\
-#endif\
-  {/
-}' paddle/fluid/imperative/amp_utils.h
+ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
+ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
 
-# Install Python build dependencies
-RUN python -m pip install --no-cache-dir -U pip && \
-    python -m pip install --no-cache-dir -r python/requirements.txt
+# Optional features (default off for stability)
+USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
+USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
+USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
+USE_TABLE_RECOGNITION = os.getenv("USE_TABLE_RECOGNITION", "true").lower() == "true"
+USE_FORMULA_RECOGNITION = os.getenv("USE_FORMULA_RECOGNITION", "false").lower() == "true"
+USE_CHART_RECOGNITION = os.getenv("USE_CHART_RECOGNITION", "false").lower() == "true"
 
-# Clean and configure
-RUN rm -rf /paddle/build && mkdir /paddle/build
-WORKDIR /paddle/build
+# Model names (None -> auto)
+LAYOUT_DETECTION_MODEL_NAME = os.getenv("LAYOUT_DETECTION_MODEL_NAME") or None
+TEXT_DETECTION_MODEL_NAME = os.getenv("TEXT_DETECTION_MODEL_NAME") or None
+TEXT_RECOGNITION_MODEL_NAME = os.getenv("TEXT_RECOGNITION_MODEL_NAME") or None
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = os.getenv("WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME") or None
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = os.getenv("WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME") or None
+TABLE_CLASSIFICATION_MODEL_NAME = os.getenv("TABLE_CLASSIFICATION_MODEL_NAME") or None
+FORMULA_RECOGNITION_MODEL_NAME = os.getenv("FORMULA_RECOGNITION_MODEL_NAME") or None
+CHART_RECOGNITION_MODEL_NAME = os.getenv("CHART_RECOGNITION_MODEL_NAME") or None
 
-RUN cmake .. -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_SYSTEM_NAME=Linux \
-    -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-    -DON_INFER=ON \
-    -DWITH_STATIC_LIB=OFF \
-    -DWITH_PIR=OFF -DPADDLE_WITH_PIR=OFF -DPIR_FULL=OFF \
-    -DWITH_SPARSE_TENSOR=OFF \
-    -DWITH_GPU=OFF -DWITH_XPU=OFF -DWITH_TENSORRT=OFF \
-    -DWITH_MKL=OFF -DWITH_SYSTEM_BLAS=ON -DWITH_OPENBLAS=ON \
-    -DWITH_MKLDNN=OFF -DWITH_ONEDNN=OFF \
-    -DWITH_ARM=ON -DWITH_AVX=OFF -DWITH_XBYAK=OFF \
-    -DWITH_DISTRIBUTE=OFF -DWITH_BRPC=OFF -DWITH_PSCORE=OFF -DWITH_GLOO=OFF \
-    -DWITH_CINN=OFF -DWITH_CUDNN_FRONTEND=OFF -DWITH_CUTLASS=OFF -DWITH_FLASH_ATTENTION=OFF \
-    -DWITH_NCCL=OFF -DWITH_RCCL=OFF \
-    -DWITH_CUSTOM_DEVICE=OFF -DWITH_HETERPS=OFF -DWITH_PSLIB=OFF \
-    -DWITH_ARM_BRPC=OFF -DWITH_XPU_BKCL=OFF \
-    -DWITH_INFERENCE_API_TEST=OFF -DWITH_TESTING=OFF \
-    -DWITH_SHARED_PHI=OFF -DWITH_CRYPTO=OFF \
-    -DWITH_LITE=OFF \
-    -DWITH_STRIP=ON -DWITH_UNITY_BUILD=OFF \
-    -DWITH_PYTHON=ON -DPY_VERSION=3.11
+# Thresholds / limits
+LAYOUT_THRESHOLD = float(os.getenv("LAYOUT_THRESHOLD", "0.5"))
+TEXT_DET_THRESH = float(os.getenv("TEXT_DET_THRESH", "0.3"))
+TEXT_DET_BOX_THRESH = float(os.getenv("TEXT_DET_BOX_THRESH", "0.6"))
+TEXT_DET_UNCLIP_RATIO = float(os.getenv("TEXT_DET_UNCLIP_RATIO", "2.0"))
+TEXT_DET_LIMIT_SIDE_LEN = int(os.getenv("TEXT_DET_LIMIT_SIDE_LEN", "960"))
+TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "max")
+TEXT_REC_SCORE_THRESH = float(os.getenv("TEXT_REC_SCORE_THRESH", "0.0"))
+TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "1"))
 
-# Build (adjust jobs for available RAM/CPU)
-ARG BUILD_JOBS=2
-RUN ninja -j${BUILD_JOBS} && ls -lah /paddle/build/python/dist
+ALLOWED_EXTENSIONS = set(ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(","))
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 
-# Export the wheel
-RUN mkdir -p /wheel && cp -v /paddle/build/python/dist/*.whl /wheel/
+# Apply native thread caps BEFORE model init
+os.environ["OMP_NUM_THREADS"] = str(OMP_THREADS)
+os.environ["OPENBLAS_NUM_THREADS"] = str(OPENBLAS_THREADS)
+os.environ["FLAGS_use_mkldnn"] = "1" if ENABLE_MKLDNN else "0"
 
-# ===== Stage 2: Runtime =====
-FROM python:3.11-slim
+# Singleton PPStructureV3 pipeline
+_pp = None
+_pp_lock = threading.Lock()
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 && \
-    rm -rf /var/lib/apt/lists/*
+def get_pipeline():
+    global _pp
+    if _pp is None:
+        with _pp_lock:
+            if _pp is None:
+                _pp = PPStructureV3(
+                    device=DEVICE,
+                    enable_mkldnn=ENABLE_MKLDNN,
+                    enable_hpi=ENABLE_HPI,
+                    cpu_threads=CPU_THREADS,
+                    lang=OCR_LANG,
+                    layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
+                    text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
+                    text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
+                    wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+                    wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+                    table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
+                    formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
+                    chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+                    layout_threshold=LAYOUT_THRESHOLD,
+                    text_det_thresh=TEXT_DET_THRESH,
+                    text_det_box_thresh=TEXT_DET_BOX_THRESH,
+                    text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
+                    text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+                    text_det_limit_type=TEXT_DET_LIMIT_TYPE,
+                    text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
+                    text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+                    use_doc_unwarping=USE_DOC_UNWARPING,
+                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+                    use_table_recognition=USE_TABLE_RECOGNITION,
+                    use_formula_recognition=USE_FORMULA_RECOGNITION,
+                    use_chart_recognition=USE_CHART_RECOGNITION,
+                )
+    return _pp
 
-COPY --from=paddle-builder /wheel /tmp/wheel
-RUN python -m pip install --no-cache-dir -U pip && \
-    python -m pip install --no-cache-dir /tmp/wheel/*.whl && \
-    python -m pip install --no-cache-dir "paddleocr==3.2" fastapi uvicorn[standard] python-multipart
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _ = get_pipeline()
+    yield
 
-WORKDIR /app
-COPY app /app/app
+app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
 
-EXPOSE 8000
-CMD ["uvicorn","app.server:app","--host","0.0.0.0","--port","8000","--workers","1"]
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.post("/parse")
+async def parse_endpoint(
+    files: List[UploadFile] = File(...),
+    output_format: Optional[Literal["json", "markdown"]] = Query(default="json"),
+):
+    ofmt = (output_format or "json").lower()
+    if ofmt not in ("json", "markdown"):
+        ofmt = "json"
+
+    results = []
+    tmp_paths = []
+
+    try:
+        for f in files:
+            if not f.filename:
+                raise HTTPException(status_code=400, detail="Missing filename")
+
+            suffix = Path(f.filename).suffix.lower()
+            if suffix not in ALLOWED_EXTENSIONS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported file type: {suffix}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+                )
+
+            fd, tmp_path = tempfile.mkstemp(prefix="ppsv3_", suffix=suffix, dir="/tmp")
+            tmp_paths.append(tmp_path)
+            size = 0
+            with os.fdopen(fd, "wb") as out:
+                while True:
+                    chunk = await f.read(1 << 20)  # 1 MiB
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    out.write(chunk)
+                    if size > MAX_FILE_SIZE_MB * 1024 * 1024:
+                        raise HTTPException(status_code=413, detail=f"File too large (>{MAX_FILE_SIZE_MB}MB)")
+            if size == 0:
+                raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+            pp = get_pipeline()
+            try:
+                # Minimal patch: offload CPU-bound inference to a threadpool
+                result = await run_in_threadpool(pp.predict, input=tmp_path)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
+
+            if ofmt == "json":
+                # Prefer SDK serialization; fallback to vars()
+                outdir = tempfile.mkdtemp(prefix="ppsv3_json_")
+                try:
+                    if hasattr(result, "save_to_json"):
+                        result.save_to_json(save_path=outdir)
+                        docs = []
+                        for name in sorted(os.listdir(outdir)):
+                            if name.endswith(".json"):
+                                with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
+                                    docs.append(json.load(fh))
+                        results.append({"filename": f.filename, "documents": docs or [vars(result)]})
+                    else:
+                        results.append({"filename": f.filename, "documents": [vars(result)]})
+                finally:
+                    import shutil
+                    shutil.rmtree(outdir, ignore_errors=True)
+            else:
+                md_body = None
+                if hasattr(result, "markdown"):
+                    md_body = result.markdown
+                elif hasattr(result, "to_markdown"):
+                    md_body = result.to_markdown()
+                else:
+                    outdir = tempfile.mkdtemp(prefix="ppsv3_md_")
+                    try:
+                        if hasattr(result, "save_to_markdown"):
+                            result.save_to_markdown(save_path=outdir)
+                            parts = []
+                            for name in sorted(os.listdir(outdir)):
+                                if name.endswith(".md"):
+                                    with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
+                                        parts.append(fh.read())
+                            md_body = "\n\n".join(parts) if parts else str(result)
+                        else:
+                            md_body = str(result)
+                    finally:
+                        import shutil
+                        shutil.rmtree(outdir, ignore_errors=True)
+                results.append({"filename": f.filename, "documents_markdown": [md_body]})
+
+        if ofmt == "json":
+            return JSONResponse({"results": results})
+
+        body = "\n\n".join(f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) for item in results)
+        return PlainTextResponse(body, media_type="text/markdown")
+
+    finally:
+        for p in tmp_paths:
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
