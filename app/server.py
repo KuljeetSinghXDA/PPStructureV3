@@ -1,25 +1,6 @@
-import tempfile
-
-# --- Environment must be set before any Paddle/NumPy/OpenBLAS import ---
+# --- Standard library imports first ---
 import os
-
-# Threading caps to avoid nested parallelism and dueling thread pools
-os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "1"))
-os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
-
-# Pin OpenBLAS to a safe ARM core on Ampere A1
-os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
-
-# Default: disable MKLDNN on ARM unless explicitly enabled via env
-# (Will be mirrored into the pipeline init below)
-os.environ.setdefault("FLAGS_use_mkldnn", "0")
-
-# Optional noise reduction and GC tuning
-os.environ.setdefault("GLOG_minloglevel", "2")
-os.environ.setdefault("FLAGS_eager_delete_tensor_gb", "0.0")
-
-# -----------------------------------------------------------------------
-
+import tempfile
 import threading
 import json
 import shutil
@@ -31,8 +12,25 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-from paddleocr import PPStructureV3  # import after envs are applied
+# --- Environment must be set before any Paddle/NumPy/OpenBLAS import ---
 
+# Threading caps to avoid nested parallelism and dueling thread pools
+os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "1"))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
+
+# Pin OpenBLAS to a safe ARM core on Ampere A1
+os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
+
+# Default: disable MKLDNN on ARM unless explicitly enabled via env
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+
+# Optional noise reduction and GC tuning
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("FLAGS_eager_delete_tensor_gb", "0.0")
+
+# -----------------------------------------------------------------------
+
+from paddleocr import PPStructureV3  # import after envs are applied
 
 # ================= Core Configuration =================
 
