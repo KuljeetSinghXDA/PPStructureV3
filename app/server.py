@@ -1,9 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.concurrency import run_in_threadpool
 from typing import List, Literal, Optional
 from pathlib import Path
 from contextlib import asynccontextmanager
 import os, tempfile, threading, json
+
 from paddleocr import PPStructureV3
 
 # Core configuration (all via environment)
@@ -150,30 +152,30 @@ async def parse_endpoint(
 
             pp = get_pipeline()
             try:
-                result = pp.predict(input=tmp_path)
+                # Offload the CPU-bound call to a threadpool to keep the event loop responsive
+                result = await run_in_threadpool(pp.predict, input=tmp_path)
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
 
             if ofmt == "json":
                 # Prefer structured JSON from the SDK; fall back to vars(result)
+                outdir = tempfile.mkdtemp(prefix="ppsv3_json_")
                 try:
-                    # Some builds expose save_to_json for serialization
-                    outdir = tempfile.mkdtemp(prefix="ppsv3_json_")
-                    result.save_to_json(save_path=outdir)
-                    docs = []
-                    for name in sorted(os.listdir(outdir)):
-                        if name.endswith(".json"):
-                            with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
-                                docs.append(json.load(fh))
-                    results.append({"filename": f.filename, "documents": docs or [vars(result)]})
+                    if hasattr(result, "save_to_json"):
+                        result.save_to_json(save_path=outdir)
+                        docs = []
+                        for name in sorted(os.listdir(outdir)):
+                            if name.endswith(".json"):
+                                with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
+                                    docs.append(json.load(fh))
+                        results.append({"filename": f.filename, "documents": docs or [vars(result)]})
+                    else:
+                        results.append({"filename": f.filename, "documents": [vars(result)]})
                 finally:
                     import shutil
-                    try:
-                        shutil.rmtree(outdir, ignore_errors=True)
-                    except Exception:
-                        pass
+                    shutil.rmtree(outdir, ignore_errors=True)
             else:
-                # Use markdown attribute if available; else save and read
+                # Markdown: use attribute if available; else serialize then read back
                 md_body = None
                 if hasattr(result, "markdown"):
                     md_body = result.markdown
@@ -182,19 +184,19 @@ async def parse_endpoint(
                 else:
                     outdir = tempfile.mkdtemp(prefix="ppsv3_md_")
                     try:
-                        result.save_to_markdown(save_path=outdir)
-                        parts = []
-                        for name in sorted(os.listdir(outdir)):
-                            if name.endswith(".md"):
-                                with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
-                                    parts.append(fh.read())
-                        md_body = "\n\n".join(parts) if parts else str(result)
+                        if hasattr(result, "save_to_markdown"):
+                            result.save_to_markdown(save_path=outdir)
+                            parts = []
+                            for name in sorted(os.listdir(outdir)):
+                                if name.endswith(".md"):
+                                    with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
+                                        parts.append(fh.read())
+                            md_body = "\n\n".join(parts) if parts else str(result)
+                        else:
+                            md_body = str(result)
                     finally:
                         import shutil
-                        try:
-                            shutil.rmtree(outdir, ignore_errors=True)
-                        except Exception:
-                            pass
+                        shutil.rmtree(outdir, ignore_errors=True)
                 results.append({"filename": f.filename, "documents_markdown": [md_body]})
 
         if ofmt == "json":
