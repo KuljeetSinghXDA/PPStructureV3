@@ -16,15 +16,10 @@ from paddleocr import PPStructureV3  # import after envs are applied
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
 OCR_LANG = os.getenv("OCR_LANG", "en")
-
-# Start conservative; scale via env after stability
 CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
-
-# Allow enabling later from Dokploy; default off for ARM stability
 ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
 ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
 
-# Optional modules (see PaddleOCR pipeline docs)
 USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
 USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
 USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
@@ -32,7 +27,6 @@ USE_TABLE_RECOGNITION = os.getenv("USE_TABLE_RECOGNITION", "true").lower() == "t
 USE_FORMULA_RECOGNITION = os.getenv("USE_FORMULA_RECOGNITION", "false").lower() == "true"
 USE_CHART_RECOGNITION = os.getenv("USE_CHART_RECOGNITION", "false").lower() == "true"
 
-# Model names (None -> auto)
 LAYOUT_DETECTION_MODEL_NAME = os.getenv("LAYOUT_DETECTION_MODEL_NAME") or None
 TEXT_DETECTION_MODEL_NAME = os.getenv("TEXT_DETECTION_MODEL_NAME") or None
 TEXT_RECOGNITION_MODEL_NAME = os.getenv("TEXT_RECOGNITION_MODEL_NAME") or None
@@ -42,7 +36,6 @@ TABLE_CLASSIFICATION_MODEL_NAME = os.getenv("TABLE_CLASSIFICATION_MODEL_NAME") o
 FORMULA_RECOGNITION_MODEL_NAME = os.getenv("FORMULA_RECOGNITION_MODEL_NAME") or None
 CHART_RECOGNITION_MODEL_NAME = os.getenv("CHART_RECOGNITION_MODEL_NAME") or None
 
-# Thresholds / limits
 LAYOUT_THRESHOLD = float(os.getenv("LAYOUT_THRESHOLD", "0.5"))
 TEXT_DET_THRESH = float(os.getenv("TEXT_DET_THRESH", "0.3"))
 TEXT_DET_BOX_THRESH = float(os.getenv("TEXT_DET_BOX_THRESH", "0.6"))
@@ -52,17 +45,11 @@ TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "max")
 TEXT_REC_SCORE_THRESH = float(os.getenv("TEXT_REC_SCORE_THRESH", "0.0"))
 TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "1"))
 
-ALLOWED_EXTENSIONS = set(
-    ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(",")
-)
+ALLOWED_EXTENSIONS = set(ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(","))
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-
-# Bounded parallelism for predict on shared pipeline
-# 1 == fully serialized; raise to >1 cautiously after stability
 MAX_PARALLEL_PREDICT = int(os.getenv("MAX_PARALLEL_PREDICT", "1"))
 
 # ================= Singleton Pipeline + Bounded Concurrency =================
-
 _pp = None
 _pp_lock = threading.Lock()
 _predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
@@ -74,9 +61,9 @@ def get_pipeline():
             if _pp is None:
                 _pp = PPStructureV3(
                     device=DEVICE,
-                    enable_mkldnn=ENABLE_MKLDNN,  # documented CPU accel flag
+                    enable_mkldnn=ENABLE_MKLDNN,
                     enable_hpi=ENABLE_HPI,
-                    cpu_threads=CPU_THREADS,      # documented CPU threads
+                    cpu_threads=CPU_THREADS,
                     lang=OCR_LANG,
                     layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
                     text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
@@ -94,9 +81,9 @@ def get_pipeline():
                     text_det_limit_type=TEXT_DET_LIMIT_TYPE,
                     text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
                     text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,  # defaults False in docs
-                    use_doc_unwarping=USE_DOC_UNWARPING,                          # defaults False in docs
-                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,            # defaults False in docs
+                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+                    use_doc_unwarping=USE_DOC_UNWARPING,
+                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,
                     use_table_recognition=USE_TABLE_RECOGNITION,
                     use_formula_recognition=USE_FORMULA_RECOGNITION,
                     use_chart_recognition=USE_CHART_RECOGNITION,
@@ -113,16 +100,6 @@ app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifesp
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-def _normalize_to_list(obj):
-    if obj is None:
-        return []
-    if isinstance(obj, (list, tuple)):
-        return list(obj)
-    try:
-        return list(obj)
-    except TypeError:
-        return [obj]
 
 @app.post("/parse")
 async def parse_endpoint(
@@ -170,11 +147,18 @@ async def parse_endpoint(
                     return pp.predict(input=path)
 
             try:
-                output = await run_in_threadpool(_predict, tmp_path)
+                result = await run_in_threadpool(_predict, tmp_path)
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
 
-            items = _normalize_to_list(output)
+            # Normalize output to a list of per-page items (PP-StructureV3 returns an iterable)
+            if isinstance(result, (list, tuple)):
+                items = list(result)
+            else:
+                try:
+                    items = list(result)
+                except TypeError:
+                    items = [result]
 
             if ofmt == "json":
                 docs = []
@@ -183,23 +167,51 @@ async def parse_endpoint(
                         docs.append(res.json)
                     elif hasattr(res, "to_dict"):
                         docs.append(res.to_dict())
-                    elif hasattr(res, "__dict__"):
-                        docs.append({k: getattr(res, k) for k in vars(res)})
+                    elif isinstance(res, dict):
+                        docs.append(res)
                     else:
                         docs.append(str(res))
                 results.append({"filename": f.filename, "documents": docs})
             else:
-                md_docs = []
+                # Build markdown using documented page-level markdown info and concatenation helper
+                markdown_infos = []
+                page_texts = []
                 for res in items:
-                    md = None
                     if hasattr(res, "markdown"):
                         md = res.markdown
+                        if isinstance(md, dict):
+                            markdown_infos.append(md)
+                        elif isinstance(md, str):
+                            page_texts.append(md)
+                        else:
+                            page_texts.append(str(md))
                     elif hasattr(res, "to_markdown"):
-                        md = res.to_markdown()
+                        page_texts.append(res.to_markdown())
+                    elif hasattr(res, "save_to_markdown"):
+                        outdir = tempfile.mkdtemp(prefix="ppsv3_md_")
+                        try:
+                            res.save_to_markdown(save_path=outdir)
+                            parts = []
+                            for name in sorted(os.listdir(outdir)):
+                                if name.endswith(".md"):
+                                    with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
+                                        parts.append(fh.read())
+                            page_texts.append("\n\n".join(parts) if parts else "")
+                        finally:
+                            shutil.rmtree(outdir, ignore_errors=True)
                     else:
-                        md = str(res)
-                    md_docs.append(md)
-                results.append({"filename": f.filename, "documents_markdown": md_docs})
+                        page_texts.append(str(res))
+
+                if markdown_infos:
+                    try:
+                        combined_md = pp.concatenate_markdown_pages(markdown_infos)
+                    except Exception:
+                        # Fallback: join 'text' fields if helper is unavailable
+                        combined_md = "\n\n".join(mi.get("text", "") for mi in markdown_infos)
+                else:
+                    combined_md = "\n\n".join(page_texts)
+
+                results.append({"filename": f.filename, "documents_markdown": [combined_md]})
 
         if ofmt == "json":
             return JSONResponse({"results": results})
