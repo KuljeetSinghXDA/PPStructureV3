@@ -2,18 +2,18 @@ FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install runtime dependencies
+# Install runtime dependencies + build tools (needed for some native extensions)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
     libopenblas0 libgfortran5 libgomp1 \
-    build-essential g++ wget && \
+    build-essential g++ && \
     rm -rf /var/lib/apt/lists/*
 
-# Install PaddlePaddle official ARM64 CPU wheel
+# Install from PyPI (has ARM64 wheels for most packages)
 RUN python -m pip install --no-cache-dir -U pip && \
     python -m pip install --no-cache-dir \
-        paddlepaddle==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
-    python -m pip install --no-cache-dir "paddlex[ocr]==3.2.*" && \
+        paddlepaddle==3.2.0 \
+        "paddlex[ocr]==3.2.*" && \
     python -m pip install --no-cache-dir \
         fastapi uvicorn[standard] python-multipart && \
     apt-get purge -y build-essential g++ && \
