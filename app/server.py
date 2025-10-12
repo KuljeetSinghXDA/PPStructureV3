@@ -20,12 +20,6 @@ _pp = None
 _pp_lock = threading.Lock()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    _ = get_pipeline()
-    yield
-
-
 app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
 
 
