@@ -7,11 +7,29 @@ import shutil
 from pathlib import Path
 from typing import List, Literal, Optional
 from contextlib import asynccontextmanager
+
+# Threading caps to avoid nested parallelism and dueling thread pools
+os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "1"))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
+
+# Pin OpenBLAS to a safe ARM core on Ampere A1
+os.environ.setdefault("OPENBLAS_CORETYPE", "ARMV8")
+
+# Default: disable MKLDNN on ARM unless explicitly enabled via env
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+
+# Optional noise reduction and GC tuning
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("FLAGS_eager_delete_tensor_gb", "0.0")
+
+# -----------------------------------------------------------------------
+
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
 from paddleocr import PPStructureV3  # import after envs are applied
+
 
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
@@ -24,7 +42,7 @@ CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
 ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
 
-# Optional modules (see PaddleOCR pipeline docs)
+# Optional modules
 USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
 USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
 USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
@@ -67,6 +85,7 @@ _pp = None
 _pp_lock = threading.Lock()
 _predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
 
+
 def get_pipeline():
     global _pp
     if _pp is None:
@@ -103,19 +122,23 @@ def get_pipeline():
                 )
     return _pp
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ = get_pipeline()
     yield
 
+
 app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+
 def _normalize_to_list(obj):
-    """Convert predict output to list of result items."""
+    """Convert pipeline output to list of result items."""
     if obj is None:
         return []
     if isinstance(obj, (list, tuple)):
@@ -125,18 +148,6 @@ def _normalize_to_list(obj):
     except TypeError:
         return [obj]
 
-def _extract_markdown_text(md_obj):
-    """Extract markdown text string from result object or dict."""
-    if isinstance(md_obj, str):
-        return md_obj
-    if isinstance(md_obj, dict):
-        # If markdown dict has 'text' key, use that
-        if 'text' in md_obj:
-            return md_obj['text']
-        # Otherwise convert the whole dict to JSON-formatted string
-        return json.dumps(md_obj, ensure_ascii=False, indent=2)
-    # Fallback: convert to string
-    return str(md_obj)
 
 @app.post("/parse")
 async def parse_endpoint(
@@ -191,35 +202,47 @@ async def parse_endpoint(
             items = _normalize_to_list(output)
 
             if ofmt == "json":
+                # Extract JSON from each result item
                 docs = []
                 for res in items:
                     if hasattr(res, "json"):
                         docs.append(res.json)
                     elif hasattr(res, "to_dict"):
                         docs.append(res.to_dict())
-                    elif isinstance(res, dict):
-                        docs.append(res)
                     elif hasattr(res, "__dict__"):
                         docs.append({k: getattr(res, k) for k in vars(res)})
                     else:
-                        docs.append({"raw": str(res)})
+                        docs.append(str(res))
                 results.append({"filename": f.filename, "documents": docs})
             else:
-                md_docs = []
+                # Extract markdown from each result item (res.markdown is a dict)
+                md_pages = []
                 for res in items:
-                    md_text = None
                     if hasattr(res, "markdown"):
-                        md_text = _extract_markdown_text(res.markdown)
+                        # res.markdown is a dict with 'markdown_texts' and 'markdown_images'
+                        md_pages.append(res.markdown)
                     elif hasattr(res, "to_markdown"):
-                        md_text = _extract_markdown_text(res.to_markdown())
+                        txt = res.to_markdown()
+                        md_pages.append({"markdown_texts": txt, "markdown_images": {}})
                     else:
-                        md_text = str(res)
-                    md_docs.append(md_text)
-                results.append({"filename": f.filename, "documents_markdown": md_docs})
+                        md_pages.append({"markdown_texts": str(res), "markdown_images": {}})
+
+                # Use the pipeline's concatenate_markdown_pages to merge all pages
+                try:
+                    merged_md = pp.concatenate_markdown_pages(md_pages)
+                except Exception:
+                    # Fallback if concatenation fails
+                    merged_md = "\n\n".join(
+                        page.get("markdown_texts", str(page)) if isinstance(page, dict) else str(page)
+                        for page in md_pages
+                    )
+                
+                results.append({"filename": f.filename, "documents_markdown": [merged_md]})
 
         if ofmt == "json":
             return JSONResponse({"results": results})
 
+        # Concatenate all files' markdown
         body = "\n\n".join(
             f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) 
             for item in results
