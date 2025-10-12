@@ -15,8 +15,9 @@ RUN git clone --depth 1 https://github.com/PaddlePaddle/Paddle.git . && \
     git submodule update --init --recursive
 
 # Install Python build dependencies
+# Install Python build dependencies
 RUN python -m pip install --no-cache-dir -U pip && \
-    python -m pip install --no-cache-dir -r /paddle/python/requirements.txt && \
+    python -m pip install --no-cache-dir -r /paddle/python/requirements.txt
 
 WORKDIR /paddle/build
 
@@ -39,9 +40,6 @@ RUN cmake .. -G Ninja \
   -DWITH_STRIP=ON -DWITH_UNITY_BUILD=OFF \
   -DWITH_PYTHON=ON -DPY_VERSION=3.14 \
   -DWITH_TESTING=OFF -DON_INFER=ON
-
-
-
 
 # Build with low parallelism to avoid OOM on smaller VMs
 ARG BUILD_JOBS=2
