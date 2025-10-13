@@ -17,7 +17,6 @@ from paddleocr import PPStructureV3  # import after envs are applied
 DEVICE = os.getenv("DEVICE", "cpu")
 OCR_LANG = os.getenv("OCR_LANG", "en")
 CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
-ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
 
 USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
 USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
