@@ -10,33 +10,28 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-def getenv_bool(key: str, default: bool = False) -> bool:
-    # Robust boolean parsing for env strings: true/false/1/0/yes/no
-    return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
+# Pinned configuration - no environment variable overrides
+ENABLE_HPI = False
+ENABLE_MKLDNN = True
 
-# Accelerator toggles (safe defaults for ARM64 CPU)
-ENABLE_HPI = getenv_bool("ENABLE_HPI", False)        # keep False on ARM64
-ENABLE_MKLDNN = getenv_bool("ENABLE_MKLDNN", True)   # ignored if unsupported on ARM
+from paddleocr import PPStructureV3
 
-from paddleocr import PPStructureV3  # import after envs are applied
-
-# ================= Core Configuration =================
-DEVICE = os.getenv("DEVICE", "cpu")
-# Default to English; change via .env if needed
-OCR_LANG = os.getenv("OCR_LANG", "en")
-CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
+# ================= Core Configuration (Pinned Values) =================
+DEVICE = "cpu"
+OCR_LANG = "en"
+CPU_THREADS = 4
 
 # Optional accuracy boosters
-USE_DOC_ORIENTATION_CLASSIFY = getenv_bool("USE_DOC_ORIENTATION_CLASSIFY", False)
-USE_DOC_UNWARPING = getenv_bool("USE_DOC_UNWARPING", False)
-USE_TEXTLINE_ORIENTATION = getenv_bool("USE_TEXTLINE_ORIENTATION", False)
+USE_DOC_ORIENTATION_CLASSIFY = False
+USE_DOC_UNWARPING = False
+USE_TEXTLINE_ORIENTATION = False
 
 # Subpipeline toggles
-USE_TABLE_RECOGNITION = getenv_bool("USE_TABLE_RECOGNITION", True)
-USE_FORMULA_RECOGNITION = getenv_bool("USE_FORMULA_RECOGNITION", False)
-USE_CHART_RECOGNITION = getenv_bool("USE_CHART_RECOGNITION", False)
+USE_TABLE_RECOGNITION = True
+USE_FORMULA_RECOGNITION = False
+USE_CHART_RECOGNITION = False
 
-# Model overrides (optional) 
+# Model overrides
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
@@ -46,22 +41,22 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters (accuracy-leaning defaults)
-LAYOUT_THRESHOLD = float(os.getenv("LAYOUT_THRESHOLD", "0.5"))
-TEXT_DET_THRESH = float(os.getenv("TEXT_DET_THRESH", "0.3"))
-TEXT_DET_BOX_THRESH = float(os.getenv("TEXT_DET_BOX_THRESH", "0.6"))
-TEXT_DET_UNCLIP_RATIO = float(os.getenv("TEXT_DET_UNCLIP_RATIO", "2.0"))
-TEXT_DET_LIMIT_SIDE_LEN = int(os.getenv("TEXT_DET_LIMIT_SIDE_LEN", "960"))
-TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "min")
-TEXT_REC_SCORE_THRESH = float(os.getenv("TEXT_REC_SCORE_THRESH", "0.0"))
-TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "1"))
+# Detection/recognition parameters
+LAYOUT_THRESHOLD = 0.5
+TEXT_DET_THRESH = 0.3
+TEXT_DET_BOX_THRESH = 0.6
+TEXT_DET_UNCLIP_RATIO = 2.0
+TEXT_DET_LIMIT_SIDE_LEN = 960
+TEXT_DET_LIMIT_TYPE = "min"
+TEXT_REC_SCORE_THRESH = 0.0
+TEXT_RECOGNITION_BATCH_SIZE = 1
 
 # I/O and service limits
-ALLOWED_EXTENSIONS = set(ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(","))
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-MAX_PARALLEL_PREDICT = int(os.getenv("MAX_PARALLEL_PREDICT", "1"))
+ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
+MAX_FILE_SIZE_MB = 50
+MAX_PARALLEL_PREDICT = 1
 
-# ================= App & Lifespan (initialize once at startup) =================
+# ================= App & Lifespan =================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pipeline = PPStructureV3(
@@ -131,7 +126,7 @@ async def parse_endpoint(
             size = 0
             with os.fdopen(fd, "wb") as out:
                 while True:
-                    chunk = await f.read(1 << 20)  # 1 MiB
+                    chunk = await f.read(1 << 20)
                     if not chunk:
                         break
                     size += len(chunk)
