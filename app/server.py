@@ -60,8 +60,6 @@ async def lifespan(app: FastAPI):
     # Build a single shared pipeline instance per process
     app.state.pipeline = PPStructureV3(
         device=DEVICE,
-        enable_mkldnn=ENABLE_MKLDNN,
-        enable_hpi=ENABLE_HPI,
         cpu_threads=CPU_THREADS,
         lang=OCR_LANG,
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
