@@ -1,4 +1,3 @@
-# --- Environment must be set before any Paddle/NumPy/OpenBLAS import ---
 import os
 import tempfile
 import threading
@@ -57,8 +56,6 @@ def get_pipeline():
             if _pp is None:
                 _pp = PPStructureV3(
                     device=DEVICE,
-                    enable_mkldnn=ENABLE_MKLDNN,
-                    enable_hpi=ENABLE_HPI,
                     cpu_threads=CPU_THREADS,
                     lang=OCR_LANG,
                     layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
