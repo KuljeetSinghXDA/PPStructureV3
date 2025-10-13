@@ -24,7 +24,7 @@ from paddleocr import PPStructureV3  # import after envs are applied
 DEVICE = os.getenv("DEVICE", "cpu")
 # Default to English; change via .env if needed
 OCR_LANG = os.getenv("OCR_LANG", "en")
-CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
+CPU_THREADS = int(os.getenv("CPU_THREADS", "8"))
 
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = getenv_bool("USE_DOC_ORIENTATION_CLASSIFY", False)
