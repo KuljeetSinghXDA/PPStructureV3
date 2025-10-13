@@ -65,8 +65,10 @@ def get_pipeline():
     if _pp is None:
         with _pp_lock:
             if _pp is None:
-                _pp = PPStructureV3(
+                _pp = PPStructureV3(                    
                     device=DEVICE,
+                    enable_mkldnn=ENABLE_MKLDNN,
+                    enable_hpi=ENABLE_HPI,
                     cpu_threads=CPU_THREADS,
                     lang=OCR_LANG,
                     layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
@@ -90,8 +92,7 @@ def get_pipeline():
                     use_textline_orientation=USE_TEXTLINE_ORIENTATION,
                     use_table_recognition=USE_TABLE_RECOGNITION,
                     use_formula_recognition=USE_FORMULA_RECOGNITION,
-                    use_chart_recognition=USE_CHART_RECOGNITION,
-                                                                                   
+                    use_chart_recognition=USE_CHART_RECOGNITION,                                                                                   
                 )
     return _pp
 
