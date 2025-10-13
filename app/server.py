@@ -10,7 +10,9 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-# Pinned configuration - no environment variable overrides
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+
 ENABLE_HPI = False
 ENABLE_MKLDNN = True
 
