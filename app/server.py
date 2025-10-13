@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-
+from paddleocr import PPStructureV3  # import after envs are applied
 # ================= Runtime Environment (set before importing paddleocr) =================
 # Align OpenMP with pipeline threading for predictable CPU utilization.
 os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "8"))
@@ -24,7 +24,7 @@ def getenv_bool(key: str, default: bool = False) -> bool:
 ENABLE_HPI = getenv_bool("ENABLE_HPI", False)        # Keep False on ARM64
 ENABLE_MKLDNN = getenv_bool("ENABLE_MKLDNN", True)   # Ignored if unsupported
 
-from paddleocr import PPStructureV3  # import after envs are applied
+
 
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
