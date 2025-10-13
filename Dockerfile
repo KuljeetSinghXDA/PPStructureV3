@@ -10,9 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 wget && \
     rm -rf /var/lib/apt/lists/*
 
-# Disable MKLDNN at framework level for CPU stability on ARM
-ENV FLAGS_use_mkldnn=0
-
 # Latest pip + Paddle CPU wheel from official CPU index (Armv8/aarch64 supported),
 # plus PaddleOCR (doc-parser), FastAPI, Uvicorn, and python-multipart
 RUN python -m pip install --no-cache-dir -U pip --root-user-action=ignore \
