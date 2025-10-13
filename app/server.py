@@ -56,6 +56,9 @@ ALLOWED_EXTENSIONS = set(ext.strip().lower() for ext in os.getenv("ALLOWED_EXTEN
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 MAX_PARALLEL_PREDICT = int(os.getenv("MAX_PARALLEL_PREDICT", "1"))
 
+# Initialize semaphore for bounded concurrency
+_predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
+
 # ================= Singleton Pipeline + Bounded Concurrency =================
 _pp = None
 _pp_lock = threading.Lock()
