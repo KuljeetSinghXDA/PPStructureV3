@@ -17,8 +17,6 @@ from paddleocr import PPStructureV3
 
 # ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
-OCR_LANG = "en"
-CPU_THREADS = 4
 
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = False
@@ -62,8 +60,6 @@ async def lifespan(app: FastAPI):
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
-        cpu_threads=CPU_THREADS,
-        lang=OCR_LANG,
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
