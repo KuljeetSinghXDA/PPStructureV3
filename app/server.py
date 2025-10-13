@@ -1,6 +1,7 @@
 import os
 import tempfile
 import threading
+import json
 import shutil
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -8,26 +9,24 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-from paddleocr import PPStructureV3
 
-def getenv_bool(key: str, default: bool = False) -> bool:
-    # Robust boolean parsing for env strings: true/false/1/0/yes/no
-    return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
+from paddleocr import PPStructureV3
 
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
-OCR_LANG = os.getenv("OCR_LANG", "en")  # English by default
+# Default to English; change via .env if needed
+OCR_LANG = os.getenv("OCR_LANG", "en")
 CPU_THREADS = int(os.getenv("CPU_THREADS", "8"))
 
 # Optional accuracy boosters
-USE_DOC_ORIENTATION_CLASSIFY = getenv_bool("USE_DOC_ORIENTATION_CLASSIFY", False)
-USE_DOC_UNWARPING = getenv_bool("USE_DOC_UNWARPING", False)
-USE_TEXTLINE_ORIENTATION = getenv_bool("USE_TEXTLINE_ORIENTATION", False)
+USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", False)
+USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", False)
+USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", False)
 
 # Subpipeline toggles
-USE_TABLE_RECOGNITION = getenv_bool("USE_TABLE_RECOGNITION", True)
-USE_FORMULA_RECOGNITION = getenv_bool("USE_FORMULA_RECOGNITION", False)
-USE_CHART_RECOGNITION = getenv_bool("USE_CHART_RECOGNITION", False)
+USE_TABLE_RECOGNITION = os.getenv("USE_TABLE_RECOGNITION", True)
+USE_FORMULA_RECOGNITION = os.getenv("USE_FORMULA_RECOGNITION", False)
+USE_CHART_RECOGNITION = os.getenv("USE_CHART_RECOGNITION", False)
 
 # Model overrides (optional)
 LAYOUT_DETECTION_MODEL_NAME = os.getenv("LAYOUT_DETECTION_MODEL_NAME") or None
@@ -44,8 +43,8 @@ LAYOUT_THRESHOLD = float(os.getenv("LAYOUT_THRESHOLD", "0.5"))
 TEXT_DET_THRESH = float(os.getenv("TEXT_DET_THRESH", "0.30"))
 TEXT_DET_BOX_THRESH = float(os.getenv("TEXT_DET_BOX_THRESH", "0.60"))
 TEXT_DET_UNCLIP_RATIO = float(os.getenv("TEXT_DET_UNCLIP_RATIO", "2.0"))
-TEXT_DET_LIMIT_SIDE_LEN = int(os.getenv("TEXT_DET_LIMIT_SIDE_LEN", "1280"))
-TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "min")
+TEXT_DET_LIMIT_SIDE_LEN = int(os.getenv("TEXT_DET_LIMIT_SIDE_LEN", "1280"))  # 1536 for tiny text
+TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "min")                # short-side limit
 TEXT_REC_SCORE_THRESH = float(os.getenv("TEXT_REC_SCORE_THRESH", "0.0"))
 TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "2"))
 
@@ -54,39 +53,47 @@ ALLOWED_EXTENSIONS = set(ext.strip().lower() for ext in os.getenv("ALLOWED_EXTEN
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 MAX_PARALLEL_PREDICT = int(os.getenv("MAX_PARALLEL_PREDICT", "1"))
 
-# ================= App & Lifespan (initialize once at startup) =================
+# ================= Singleton Pipeline + Bounded Concurrency =================
+_pp = None
+_pp_lock = threading.Lock()
+
+def get_pipeline():
+    global _pp
+    if _pp is None:
+        with _pp_lock:
+            if _pp is None:
+                _pp = PPStructureV3(
+                    device=DEVICE,
+                    cpu_threads=CPU_THREADS,
+                    lang=OCR_LANG,
+                    layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
+                    text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
+                    text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
+                    wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+                    wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+                    table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
+                    formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
+                    chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+                    layout_threshold=LAYOUT_THRESHOLD,
+                    text_det_thresh=TEXT_DET_THRESH,
+                    text_det_box_thresh=TEXT_DET_BOX_THRESH,
+                    text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
+                    text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+                    text_det_limit_type=TEXT_DET_LIMIT_TYPE,
+                    text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
+                    text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+                    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+                    use_doc_unwarping=USE_DOC_UNWARPING,
+                    use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+                    use_table_recognition=USE_TABLE_RECOGNITION,
+                    use_formula_recognition=USE_FORMULA_RECOGNITION,
+                    use_chart_recognition=USE_CHART_RECOGNITION,
+                )
+    return _pp
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Build a single shared pipeline instance per process
-    app.state.pipeline = PPStructureV3(
-        device=DEVICE,
-        cpu_threads=CPU_THREADS,
-        lang=OCR_LANG,
-        layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
-        text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
-        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
-        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
-        formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
-        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-        layout_threshold=LAYOUT_THRESHOLD,
-        text_det_thresh=TEXT_DET_THRESH,
-        text_det_box_thresh=TEXT_DET_BOX_THRESH,
-        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
-        text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
-        text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-        use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-        use_table_recognition=USE_TABLE_RECOGNITION,
-        use_formula_recognition=USE_FORMULA_RECOGNITION,
-        use_chart_recognition=USE_CHART_RECOGNITION,
-    )
-    # Bound in-flight predictions for stability
-    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
+    _ = get_pipeline()
     yield
 
 app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
@@ -134,16 +141,18 @@ async def parse_endpoint(
             if size == 0:
                 raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
+            pp = get_pipeline()
+
             def _predict(path: str):
-                with app.state.predict_sem:
-                    return app.state.pipeline.predict(input=path)
+                with _predict_sem:
+                    return pp.predict(input=path)
 
             try:
                 result = await run_in_threadpool(_predict, tmp_path)
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
 
-            # Normalize output to a list of per-page items
+            # Normalize output to a list of per-page items (PP-StructureV3 returns an iterable)
             if isinstance(result, (list, tuple)):
                 items = list(result)
             else:
@@ -165,6 +174,7 @@ async def parse_endpoint(
                         docs.append(str(res))
                 results.append({"filename": f.filename, "documents": docs})
             else:
+                # Build markdown using documented page-level markdown info and concatenation helper
                 markdown_infos = []
                 page_texts = []
                 for res in items:
@@ -195,8 +205,9 @@ async def parse_endpoint(
 
                 if markdown_infos:
                     try:
-                        combined_md = app.state.pipeline.concatenate_markdown_pages(markdown_infos)
+                        combined_md = pp.concatenate_markdown_pages(markdown_infos)
                     except Exception:
+                        # Fallback: join 'text' fields if helper is unavailable
                         combined_md = "\n\n".join(mi.get("text", "") for mi in markdown_infos)
                 else:
                     combined_md = "\n\n".join(page_texts)
