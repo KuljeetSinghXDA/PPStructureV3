@@ -10,15 +10,11 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
+os.environ["OPENBLAS_NUM_THREADS"] = os.getenv("OPENBLAS_NUM_THREADS", "1")
+
 # Helper to parse booleans from env
 def getenv_bool(key: str, default: bool = False) -> bool:
     return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
-    
-# ================= Runtime Environment (set before importing paddleocr) =================
-# Align OpenMP with pipeline threading for predictable CPU utilization.
-OMP_NUM_THREADS = getenv_bool("OMP_NUM_THREADS", "8")
-# Avoid dueling thread pools when Paddle uses its own threading.
-OPENBLAS_NUM_THREADS = getenv_bool("OPENBLAS_NUM_THREADS", "1")
 
 # Accelerator toggles (safe defaults for ARM64 CPU)
 ENABLE_HPI = getenv_bool("ENABLE_HPI", False)        # Keep False on ARM64
