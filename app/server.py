@@ -10,6 +10,10 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
+# Threading for BLAS/OpenMP kernels on CPU
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+
 ENABLE_HPI = False
 ENABLE_MKLDNN = True
 
@@ -30,25 +34,32 @@ USE_TABLE_RECOGNITION = True
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 
-# Model overrides
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
-TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
+# Model overrides (server variants recommended for best document accuracy)
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"  # RT-DETR-L based
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_server_det"  # switch to _mobile_det if needed
+TEXT_RECOGNITION_MODEL_NAME = "PP-OCRv5_server_rec"  # switch to en_PP-OCRv5_mobile_rec for lighter runs
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters
-LAYOUT_THRESHOLD = 0.8
-TEXT_DET_THRESH = 0.25
-TEXT_DET_BOX_THRESH = 0.7
-TEXT_DET_UNCLIP_RATIO = 1.6
+# Detection/recognition parameters (accuracy-first)
+LAYOUT_THRESHOLD = 0.5
+# Text detection (DB) tuning
+TEXT_DET_THRESH = 0.30
+TEXT_DET_BOX_THRESH = 0.60
+TEXT_DET_UNCLIP_RATIO = 1.5
+# Scale short side to 1280 for document small-text fidelity
 TEXT_DET_LIMIT_SIDE_LEN = 1280
-TEXT_DET_LIMIT_TYPE = 'max'
-TEXT_REC_SCORE_THRESH = 0.9
-TEXT_RECOGNITION_BATCH_SIZE = 16
+TEXT_DET_LIMIT_TYPE = "min"
+# Recognition filtering and batch
+TEXT_REC_SCORE_THRESH = 0.5
+TEXT_RECOGNITION_BATCH_SIZE = 1
+
+# Layout post-processing (supported by pipeline)
+LAYOUT_NMS = True
+LAYOUT_UNCLIP_RATIO = 1.0  # keep default; raise slightly only if regions are under-covered
 
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
@@ -59,11 +70,14 @@ MAX_PARALLEL_PREDICT = 1
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pipeline = PPStructureV3(
+        # Runtime/backends
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
         cpu_threads=CPU_THREADS,
         lang=OCR_LANG,
+
+        # Models
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
@@ -72,14 +86,24 @@ async def lifespan(app: FastAPI):
         table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
         formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
         chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+
+        # Layout params
         layout_threshold=LAYOUT_THRESHOLD,
+        layout_nms=LAYOUT_NMS,
+        layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
+
+        # Text detection params
         text_det_thresh=TEXT_DET_THRESH,
         text_det_box_thresh=TEXT_DET_BOX_THRESH,
         text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
         text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
         text_det_limit_type=TEXT_DET_LIMIT_TYPE,
+
+        # Text recognition params
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+
+        # Optional modules
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
@@ -137,6 +161,8 @@ async def parse_endpoint(
 
             def _predict(path: str):
                 with app.state.predict_sem:
+                    # Per-request overrides can be added here by passing kwargs
+                    # e.g., text_det_thresh=..., text_rec_score_thresh=...
                     return app.state.pipeline.predict(input=path)
 
             try:
