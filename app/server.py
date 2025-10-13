@@ -1,5 +1,7 @@
+import os
 import tempfile
 import threading
+import json
 import shutil
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -8,14 +10,10 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-# Import PaddleOCR after environment is already set by the OS/container
-from paddleocr import PPStructureV3
-
-# ================= Configuration from Environment =================
-import os
-
+# ================= Runtime Environment (set before importing paddleocr) =================
+# Align OpenMP with pipeline threading for predictable CPU utilization.
 os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "8"))
-
+# Avoid dueling thread pools when Paddle uses its own threading.
 os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
 
 # Helper to parse booleans from env
@@ -30,7 +28,8 @@ from paddleocr import PPStructureV3  # import after envs are applied
 
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
-OCR_LANG = os.getenv("OCR_LANG", "en")
+# Multilingual-friendly default: 'latin' covers many Latin-script languages (en/fr/de/es/pt/etc.)
+OCR_LANG = os.getenv("OCR_LANG", "latin")
 CPU_THREADS = int(os.getenv("CPU_THREADS", "8"))
 
 # Optional accuracy boosters
