@@ -10,11 +10,11 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-# ================= Thread caps in code ONLY (not from .env) =================
-# Align OpenMP with pipeline threading for predictable CPU utilization.
-os.environ["OMP_NUM_THREADS"] = "1"           # set in code only
-# Avoid dueling thread pools when Paddle uses its own threading.
-os.environ["OPENBLAS_NUM_THREADS"] = "4"      # set in code only
+os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "1"))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "4"))
+os.environ.setdefault("OPENBLAS_VERBOSE", os.getenv("OPENBLAS_VERBOSE", "2"))
+
+
 
 def getenv_bool(key: str, default: bool = False) -> bool:
     # Robust boolean parsing for env strings: true/false/1/0/yes/no
