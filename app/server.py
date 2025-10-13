@@ -1,7 +1,6 @@
 import os
 import tempfile
 import threading
-import json
 import shutil
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -11,13 +10,13 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
 # ================= Runtime Environment (set before importing paddleocr) =================
-# Align OpenMP with pipeline threading for predictable CPU utilization.
-os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "8"))
-# Avoid dueling thread pools when Paddle uses its own threading.
-os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
+# Hardcode threading controls for stable CPU performance on Ampere A1
+os.environ["OMP_NUM_THREADS"] = "8"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 # Helper to parse booleans from env
 def getenv_bool(key: str, default: bool = False) -> bool:
+    """Parse common boolean representations from environment variables."""
     return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
 
 # Accelerator toggles (safe defaults for ARM64 CPU)
@@ -28,7 +27,7 @@ from paddleocr import PPStructureV3  # import after envs are applied
 
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
-OCR_LANG = os.getenv("OCR_LANG", "en")
+OCR_LANG = os.getenv("OCR_LANG", "en")  # English by default
 CPU_THREADS = int(os.getenv("CPU_THREADS", "8"))
 
 # Optional accuracy boosters
@@ -56,8 +55,8 @@ LAYOUT_THRESHOLD = float(os.getenv("LAYOUT_THRESHOLD", "0.5"))
 TEXT_DET_THRESH = float(os.getenv("TEXT_DET_THRESH", "0.30"))
 TEXT_DET_BOX_THRESH = float(os.getenv("TEXT_DET_BOX_THRESH", "0.60"))
 TEXT_DET_UNCLIP_RATIO = float(os.getenv("TEXT_DET_UNCLIP_RATIO", "2.0"))
-TEXT_DET_LIMIT_SIDE_LEN = int(os.getenv("TEXT_DET_LIMIT_SIDE_LEN", "1280"))  # raise to 1536 for tiny text
-TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "min")                # short-side limit for dense text
+TEXT_DET_LIMIT_SIDE_LEN = int(os.getenv("TEXT_DET_LIMIT_SIDE_LEN", "1280"))
+TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "min")
 TEXT_REC_SCORE_THRESH = float(os.getenv("TEXT_REC_SCORE_THRESH", "0.0"))
 TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "2"))
 
