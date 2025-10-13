@@ -10,12 +10,6 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-# ================= Thread caps in code ONLY (not from .env) =================
-# Align OpenMP with pipeline threading for predictable CPU utilization.
-os.environ["OMP_NUM_THREADS"] = "8"           # set in code only
-# Avoid dueling thread pools when Paddle uses its own threading.
-os.environ["OPENBLAS_NUM_THREADS"] = "1"      # set in code only
-
 def getenv_bool(key: str, default: bool = False) -> bool:
     # Robust boolean parsing for env strings: true/false/1/0/yes/no
     return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
@@ -30,7 +24,7 @@ from paddleocr import PPStructureV3  # import after envs are applied
 DEVICE = os.getenv("DEVICE", "cpu")
 # Default to English; change via .env if needed
 OCR_LANG = os.getenv("OCR_LANG", "en")
-CPU_THREADS = int(os.getenv("CPU_THREADS", "8"))
+CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = getenv_bool("USE_DOC_ORIENTATION_CLASSIFY", False)
