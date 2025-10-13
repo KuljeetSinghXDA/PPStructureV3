@@ -10,6 +10,8 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
+os.environ["OMP_NUM_THREADS"] = "8"
+
 def getenv_bool(key: str, default: bool = False) -> bool:
     # Robust boolean parsing for env strings: true/false/1/0/yes/no
     return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
