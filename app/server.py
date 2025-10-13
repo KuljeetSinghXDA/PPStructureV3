@@ -9,10 +9,6 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-# ================= Runtime Environment (set before importing paddleocr) =================
-# Hardcode threading controls for stable CPU performance on Ampere A1
-os.environ["OMP_NUM_THREADS"] = "8"
-
 # Helper to parse booleans from env
 def getenv_bool(key: str, default: bool = False) -> bool:
     """Parse common boolean representations from environment variables."""
