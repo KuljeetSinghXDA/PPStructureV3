@@ -9,8 +9,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-
 from paddleocr import PPStructureV3
+
+def getenv_bool(key: str, default: bool = False) -> bool:
+    # Robust boolean parsing for env strings: true/false/1/0/yes/no
+    return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
 
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
@@ -19,14 +22,14 @@ OCR_LANG = os.getenv("OCR_LANG", "en")
 CPU_THREADS = int(os.getenv("CPU_THREADS", "8"))
 
 # Optional accuracy boosters
-USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", False)
-USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", False)
-USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", False)
+USE_DOC_ORIENTATION_CLASSIFY = getenv_bool("USE_DOC_ORIENTATION_CLASSIFY", False)
+USE_DOC_UNWARPING = getenv_bool("USE_DOC_UNWARPING", False)
+USE_TEXTLINE_ORIENTATION = getenv_bool("USE_TEXTLINE_ORIENTATION", False)
 
 # Subpipeline toggles
-USE_TABLE_RECOGNITION = os.getenv("USE_TABLE_RECOGNITION", True)
-USE_FORMULA_RECOGNITION = os.getenv("USE_FORMULA_RECOGNITION", False)
-USE_CHART_RECOGNITION = os.getenv("USE_CHART_RECOGNITION", False)
+USE_TABLE_RECOGNITION = getenv_bool("USE_TABLE_RECOGNITION", True)
+USE_FORMULA_RECOGNITION = getenv_bool("USE_FORMULA_RECOGNITION", False)
+USE_CHART_RECOGNITION = getenv_bool("USE_CHART_RECOGNITION", False)
 
 # Model overrides (optional)
 LAYOUT_DETECTION_MODEL_NAME = os.getenv("LAYOUT_DETECTION_MODEL_NAME") or None
@@ -88,6 +91,7 @@ def get_pipeline():
                     use_table_recognition=USE_TABLE_RECOGNITION,
                     use_formula_recognition=USE_FORMULA_RECOGNITION,
                     use_chart_recognition=USE_CHART_RECOGNITION,
+                                                                                   
                 )
     return _pp
 
