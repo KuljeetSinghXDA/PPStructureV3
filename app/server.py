@@ -8,17 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-
-# Helper to parse booleans from env
-def getenv_bool(key: str, default: bool = False) -> bool:
-    """Parse common boolean representations from environment variables."""
-    return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
-
-# Accelerator toggles (safe defaults for ARM64 CPU)
-ENABLE_HPI = getenv_bool("ENABLE_HPI", False)        # Keep False on ARM64
-ENABLE_MKLDNN = getenv_bool("ENABLE_MKLDNN", True)   # Ignored if unsupported
-
-from paddleocr import PPStructureV3  # import after envs are applied
+from paddleocr import PPStructureV3
 
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
