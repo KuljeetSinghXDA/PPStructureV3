@@ -18,7 +18,7 @@ def getenv_bool(key: str, default: bool = False) -> bool:
 
 # Accelerator toggles (safe defaults for ARM64 CPU)
 ENABLE_HPI = getenv_bool("ENABLE_HPI", False)        # keep False on ARM64
-ENABLE_MKLDNN = getenv_bool("ENABLE_MKLDNN", True)   # ignored if unsupported on ARM
+ENABLE_MKLDNN = getenv_bool("ENABLE_MKLDNN", False)   # ignored if unsupported on ARM
 
 from paddleocr import PPStructureV3  # import after envs are applied
 
