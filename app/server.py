@@ -12,9 +12,10 @@ from fastapi.concurrency import run_in_threadpool
 from paddleocr import PPStructureV3  # import after envs are applied
 # ================= Runtime Environment (set before importing paddleocr) =================
 # Align OpenMP with pipeline threading for predictable CPU utilization.
-#os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "8"))
+OMP_NUM_THREADS = os.getenv("OMP_NUM_THREADS", "8")
 # Avoid dueling thread pools when Paddle uses its own threading.
-#os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
+OPENBLAS_NUM_THREADS = os.getenv("OPENBLAS_NUM_THREADS", "1")
+
 
 # Helper to parse booleans from env
 def getenv_bool(key: str, default: bool = False) -> bool:
