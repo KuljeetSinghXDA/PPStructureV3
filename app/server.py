@@ -17,7 +17,6 @@ from paddleocr import PPStructureV3  # import after envs are applied
 DEVICE = os.getenv("DEVICE", "cpu")
 OCR_LANG = os.getenv("OCR_LANG", "en")
 CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
-ENABLE_MKLDNN = os.getenv("ENABLE_MKLDNN", "false").lower() == "true"
 ENABLE_HPI = os.getenv("ENABLE_HPI", "false").lower() == "true"
 
 USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
@@ -47,12 +46,10 @@ TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "1"))
 
 ALLOWED_EXTENSIONS = set(ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(","))
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-MAX_PARALLEL_PREDICT = int(os.getenv("MAX_PARALLEL_PREDICT", "1"))
 
 # ================= Singleton Pipeline + Bounded Concurrency =================
 _pp = None
 _pp_lock = threading.Lock()
-_predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
 
 def get_pipeline():
     global _pp
