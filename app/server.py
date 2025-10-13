@@ -11,7 +11,7 @@ from fastapi.concurrency import run_in_threadpool
 
 # ================= Runtime Environment (set before importing paddleocr) =================
 # Hardcode threading controls for stable CPU performance on Ampere A1
-os.environ["OMP_NUM_THREADS"] = "8"
+os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 # Helper to parse booleans from env
