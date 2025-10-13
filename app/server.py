@@ -1,3 +1,4 @@
+# --- Environment must be set before any Paddle/NumPy/OpenBLAS import ---
 import os
 import tempfile
 import threading
@@ -9,29 +10,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-from paddleocr import PPStructureV3
 
-def getenv_bool(key: str, default: bool = False) -> bool:
-    # Robust boolean parsing for env strings: true/false/1/0/yes/no
-    return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
+from paddleocr import PPStructureV3  # import after envs are applied
 
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
-# Default to English; change via .env if needed
 OCR_LANG = os.getenv("OCR_LANG", "en")
-CPU_THREADS = int(os.getenv("CPU_THREADS", "8"))
+CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 
-# Optional accuracy boosters
-USE_DOC_ORIENTATION_CLASSIFY = getenv_bool("USE_DOC_ORIENTATION_CLASSIFY", False)
-USE_DOC_UNWARPING = getenv_bool("USE_DOC_UNWARPING", False)
-USE_TEXTLINE_ORIENTATION = getenv_bool("USE_TEXTLINE_ORIENTATION", False)
+USE_DOC_ORIENTATION_CLASSIFY = os.getenv("USE_DOC_ORIENTATION_CLASSIFY", "false").lower() == "true"
+USE_DOC_UNWARPING = os.getenv("USE_DOC_UNWARPING", "false").lower() == "true"
+USE_TEXTLINE_ORIENTATION = os.getenv("USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
+USE_TABLE_RECOGNITION = os.getenv("USE_TABLE_RECOGNITION", "true").lower() == "true"
+USE_FORMULA_RECOGNITION = os.getenv("USE_FORMULA_RECOGNITION", "false").lower() == "true"
+USE_CHART_RECOGNITION = os.getenv("USE_CHART_RECOGNITION", "false").lower() == "true"
 
-# Subpipeline toggles
-USE_TABLE_RECOGNITION = getenv_bool("USE_TABLE_RECOGNITION", True)
-USE_FORMULA_RECOGNITION = getenv_bool("USE_FORMULA_RECOGNITION", False)
-USE_CHART_RECOGNITION = getenv_bool("USE_CHART_RECOGNITION", False)
-
-# Model overrides (optional)
 LAYOUT_DETECTION_MODEL_NAME = os.getenv("LAYOUT_DETECTION_MODEL_NAME") or None
 TEXT_DETECTION_MODEL_NAME = os.getenv("TEXT_DETECTION_MODEL_NAME") or None
 TEXT_RECOGNITION_MODEL_NAME = os.getenv("TEXT_RECOGNITION_MODEL_NAME") or None
@@ -41,23 +34,17 @@ TABLE_CLASSIFICATION_MODEL_NAME = os.getenv("TABLE_CLASSIFICATION_MODEL_NAME") o
 FORMULA_RECOGNITION_MODEL_NAME = os.getenv("FORMULA_RECOGNITION_MODEL_NAME") or None
 CHART_RECOGNITION_MODEL_NAME = os.getenv("CHART_RECOGNITION_MODEL_NAME") or None
 
-# Detection/recognition parameters (accuracy-leaning defaults)
 LAYOUT_THRESHOLD = float(os.getenv("LAYOUT_THRESHOLD", "0.5"))
-TEXT_DET_THRESH = float(os.getenv("TEXT_DET_THRESH", "0.30"))
-TEXT_DET_BOX_THRESH = float(os.getenv("TEXT_DET_BOX_THRESH", "0.60"))
+TEXT_DET_THRESH = float(os.getenv("TEXT_DET_THRESH", "0.3"))
+TEXT_DET_BOX_THRESH = float(os.getenv("TEXT_DET_BOX_THRESH", "0.6"))
 TEXT_DET_UNCLIP_RATIO = float(os.getenv("TEXT_DET_UNCLIP_RATIO", "2.0"))
-TEXT_DET_LIMIT_SIDE_LEN = int(os.getenv("TEXT_DET_LIMIT_SIDE_LEN", "1280"))  # 1536 for tiny text
-TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "min")                # short-side limit
+TEXT_DET_LIMIT_SIDE_LEN = int(os.getenv("TEXT_DET_LIMIT_SIDE_LEN", "960"))
+TEXT_DET_LIMIT_TYPE = os.getenv("TEXT_DET_LIMIT_TYPE", "max")
 TEXT_REC_SCORE_THRESH = float(os.getenv("TEXT_REC_SCORE_THRESH", "0.0"))
-TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "2"))
+TEXT_RECOGNITION_BATCH_SIZE = int(os.getenv("TEXT_RECOGNITION_BATCH_SIZE", "1"))
 
-# I/O and service limits
 ALLOWED_EXTENSIONS = set(ext.strip().lower() for ext in os.getenv("ALLOWED_EXTENSIONS", ".pdf,.jpg,.jpeg,.png,.bmp").split(","))
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-MAX_PARALLEL_PREDICT = int(os.getenv("MAX_PARALLEL_PREDICT", "1"))
-
-# Initialize semaphore for bounded concurrency
-_predict_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
 
 # ================= Singleton Pipeline + Bounded Concurrency =================
 _pp = None
@@ -68,8 +55,10 @@ def get_pipeline():
     if _pp is None:
         with _pp_lock:
             if _pp is None:
-                _pp = PPStructureV3(                    
+                _pp = PPStructureV3(
                     device=DEVICE,
+                    enable_mkldnn=ENABLE_MKLDNN,
+                    enable_hpi=ENABLE_HPI,
                     cpu_threads=CPU_THREADS,
                     lang=OCR_LANG,
                     layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
@@ -93,7 +82,7 @@ def get_pipeline():
                     use_textline_orientation=USE_TEXTLINE_ORIENTATION,
                     use_table_recognition=USE_TABLE_RECOGNITION,
                     use_formula_recognition=USE_FORMULA_RECOGNITION,
-                    use_chart_recognition=USE_CHART_RECOGNITION,                                                                                   
+                    use_chart_recognition=USE_CHART_RECOGNITION,
                 )
     return _pp
 
