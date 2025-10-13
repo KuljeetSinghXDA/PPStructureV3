@@ -1,7 +1,5 @@
-import os
 import tempfile
 import threading
-import json
 import shutil
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -10,7 +8,15 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-os.environ["OPENBLAS_NUM_THREADS"] = os.getenv("OPENBLAS_NUM_THREADS", "1")
+# Import PaddleOCR after environment is already set by the OS/container
+from paddleocr import PPStructureV3
+
+# ================= Configuration from Environment =================
+import os
+
+os.environ.setdefault("OMP_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "8"))
+
+os.environ.setdefault("OPENBLAS_NUM_THREADS", os.getenv("OPENBLAS_NUM_THREADS", "1"))
 
 # Helper to parse booleans from env
 def getenv_bool(key: str, default: bool = False) -> bool:
