@@ -16,7 +16,7 @@ def getenv_bool(key: str, default: bool = False) -> bool:
 
 # Accelerator toggles (safe defaults for ARM64 CPU)
 ENABLE_HPI = getenv_bool("ENABLE_HPI", False)        # keep False on ARM64
-ENABLE_MKLDNN = getenv_bool("ENABLE_MKLDNN", False)   # ignored if unsupported on ARM
+ENABLE_MKLDNN = getenv_bool("ENABLE_MKLDNN", True)   # ignored if unsupported on ARM
 
 from paddleocr import PPStructureV3  # import after envs are applied
 
@@ -24,7 +24,7 @@ from paddleocr import PPStructureV3  # import after envs are applied
 DEVICE = os.getenv("DEVICE", "cpu")
 # Default to English; change via .env if needed
 OCR_LANG = os.getenv("OCR_LANG", "en")
-CPU_THREADS = int(os.getenv("CPU_THREADS", "8"))
+CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = getenv_bool("USE_DOC_ORIENTATION_CLASSIFY", False)
