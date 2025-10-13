@@ -28,8 +28,7 @@ from paddleocr import PPStructureV3  # import after envs are applied
 
 # ================= Core Configuration =================
 DEVICE = os.getenv("DEVICE", "cpu")
-# Multilingual-friendly default: 'latin' covers many Latin-script languages (en/fr/de/es/pt/etc.)
-OCR_LANG = os.getenv("OCR_LANG", "latin")
+OCR_LANG = os.getenv("OCR_LANG", "en")
 CPU_THREADS = int(os.getenv("CPU_THREADS", "8"))
 
 # Optional accuracy boosters
