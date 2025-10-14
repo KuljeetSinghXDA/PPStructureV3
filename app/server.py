@@ -17,7 +17,7 @@ from paddleocr import PPStructureV3
 
 # ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
-CPU_THREADS = 3
+CPU_THREADS = 2
 
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = False
@@ -40,14 +40,14 @@ FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
 # Detection/recognition parameters
-#LAYOUT_THRESHOLD = 0.5
-#TEXT_DET_THRESH = 0.3
-#TEXT_DET_BOX_THRESH = 0.6
-#TEXT_DET_UNCLIP_RATIO = 1.5
-#TEXT_DET_LIMIT_SIDE_LEN = 1280
-#TEXT_DET_LIMIT_TYPE = "max"
-#TEXT_REC_SCORE_THRESH = 0.5
-#TEXT_RECOGNITION_BATCH_SIZE = 1
+LAYOUT_THRESHOLD = 0.5
+TEXT_DET_THRESH = 0.3
+TEXT_DET_BOX_THRESH = 0.6
+TEXT_DET_UNCLIP_RATIO = 1.5
+TEXT_DET_LIMIT_SIDE_LEN = 1280
+TEXT_DET_LIMIT_TYPE = "max"
+TEXT_REC_SCORE_THRESH = 0.5
+TEXT_RECOGNITION_BATCH_SIZE = 1
 
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
