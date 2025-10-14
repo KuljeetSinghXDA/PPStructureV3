@@ -17,6 +17,8 @@ from paddleocr import PPStructureV3
 
 # ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
+OCR_LANG = "en"
+CPU_THREADS = 4
 
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = False
@@ -30,7 +32,7 @@ USE_CHART_RECOGNITION = False
 
 # Model overrides
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_server_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
@@ -60,6 +62,8 @@ async def lifespan(app: FastAPI):
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
+        cpu_threads=CPU_THREADS,
+        lang=OCR_LANG,
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
