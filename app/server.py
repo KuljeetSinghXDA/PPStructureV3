@@ -22,7 +22,8 @@ CPU_THREADS = 4
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = False
 USE_DOC_UNWARPING = False
-USE_TEXTLINE_ORIENTATION = False
+# Enable textline orientation classifier for better stability on headings/kerning
+USE_TEXTLINE_ORIENTATION = True
 
 # Subpipeline toggles
 USE_TABLE_RECOGNITION = True
@@ -39,16 +40,19 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters
-LAYOUT_THRESHOLD = 0.10
-TEXT_DET_THRESH = 0.20
-TEXT_DET_BOX_THRESH = 0.35
-TEXT_DET_UNCLIP_RATIO = 2.3
-TEXT_DET_LIMIT_SIDE_LEN = 1920
+# Detection/recognition parameters (Aggressive high-recall profile)
+LAYOUT_THRESHOLD = 0.05
+TEXT_DET_THRESH = 0.12
+TEXT_DET_BOX_THRESH = 0.30
+TEXT_DET_UNCLIP_RATIO = 2.6
+TEXT_DET_LIMIT_SIDE_LEN = 2048
 TEXT_DET_LIMIT_TYPE = "max"
-TEXT_REC_SCORE_THRESH = 0.30
-TEXT_RECOGNITION_BATCH_SIZE = 16
+TEXT_REC_SCORE_THRESH = 0.25
+TEXT_RECOGNITION_BATCH_SIZE = 12
 
+# Extra detector/recognizer flags (if available in your installed version)
+DET_DB_SCORE_MODE = "slow"   # Stabilize DB scoring on marginal rows
+USE_DILATION = True          # Feature dilation to reduce fragmented boxes
 
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
@@ -63,6 +67,7 @@ async def lifespan(app: FastAPI):
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
         cpu_threads=CPU_THREADS,
+
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
@@ -71,20 +76,32 @@ async def lifespan(app: FastAPI):
         table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
         formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
         chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+
+        # Detector/layout thresholds and scaling
         layout_threshold=LAYOUT_THRESHOLD,
         text_det_thresh=TEXT_DET_THRESH,
         text_det_box_thresh=TEXT_DET_BOX_THRESH,
         text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
         text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
         text_det_limit_type=TEXT_DET_LIMIT_TYPE,
+
+        # Recognition thresholds and batch size
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+
+        # Orientation/textline stabilization
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+
+        # Subpipelines
         use_table_recognition=USE_TABLE_RECOGNITION,
         use_formula_recognition=USE_FORMULA_RECOGNITION,
         use_chart_recognition=USE_CHART_RECOGNITION,
+
+        # Extra detector stability flags (supported in recent pipelines)
+        det_db_score_mode=DET_DB_SCORE_MODE,
+        use_dilation=USE_DILATION,
     )
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
     yield
