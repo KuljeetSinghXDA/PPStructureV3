@@ -18,7 +18,6 @@ from paddleocr import PPStructureV3
 # ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
 OCR_LANG = "en"
-CPU_THREADS = 
 
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = False
