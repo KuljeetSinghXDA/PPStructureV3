@@ -49,9 +49,6 @@ TEXT_DET_LIMIT_TYPE = "max"
 TEXT_REC_SCORE_THRESH = 0.25
 TEXT_RECOGNITION_BATCH_SIZE = 12
 
-# DB scoring mode for detector
-DET_DB_SCORE_MODE = "slow"
-
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
@@ -81,7 +78,6 @@ async def lifespan(app: FastAPI):
         text_det_limit_type=TEXT_DET_LIMIT_TYPE,
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-        det_db_score_mode=DET_DB_SCORE_MODE,
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
