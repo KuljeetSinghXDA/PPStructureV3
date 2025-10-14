@@ -21,7 +21,7 @@ CPU_THREADS = 2
 
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = False
-USE_DOC_UNWARPING = False
+USE_DOC_UNWARPING = True
 USE_TEXTLINE_ORIENTATION = False
 
 # Subpipeline toggles
