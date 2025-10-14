@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.14-slim-trixie
 
 # Noninteractive apt to avoid debconf warnings
 ENV DEBIAN_FRONTEND=noninteractive \
