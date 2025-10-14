@@ -17,17 +17,17 @@ from paddleocr import PPStructureV3
 
 # ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
-CPU_THREADS = 4
+CPU_THREADS = None
 
 # Optional accuracy boosters
-USE_DOC_ORIENTATION_CLASSIFY = False
-USE_DOC_UNWARPING = False
-USE_TEXTLINE_ORIENTATION = False
+USE_DOC_ORIENTATION_CLASSIFY = None
+USE_DOC_UNWARPING = None
+USE_TEXTLINE_ORIENTATION = None
 
 # Subpipeline toggles
-USE_TABLE_RECOGNITION = True
-USE_FORMULA_RECOGNITION = False
-USE_CHART_RECOGNITION = False
+USE_TABLE_RECOGNITION = None
+USE_FORMULA_RECOGNITION = None
+USE_CHART_RECOGNITION = None
 
 # Model overrides
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
