@@ -49,8 +49,8 @@ TEXT_DET_LIMIT_TYPE = "max"
 TEXT_REC_SCORE_THRESH = 0.25
 TEXT_RECOGNITION_BATCH_SIZE = 12
 
-# Additional DB postprocess control
-DET_DB_SCORE_MODE = "slow"  # 'fast' or 'slow'
+# DB scoring mode for detector
+DET_DB_SCORE_MODE = "slow"
 
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
@@ -65,7 +65,6 @@ async def lifespan(app: FastAPI):
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
         cpu_threads=CPU_THREADS,
-
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
@@ -74,8 +73,6 @@ async def lifespan(app: FastAPI):
         table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
         formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
         chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-
-        # Aggressive detection/recognition knobs
         layout_threshold=LAYOUT_THRESHOLD,
         text_det_thresh=TEXT_DET_THRESH,
         text_det_box_thresh=TEXT_DET_BOX_THRESH,
@@ -84,10 +81,7 @@ async def lifespan(app: FastAPI):
         text_det_limit_type=TEXT_DET_LIMIT_TYPE,
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-
-        # DB score mode for detector postprocess
         det_db_score_mode=DET_DB_SCORE_MODE,
-
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
