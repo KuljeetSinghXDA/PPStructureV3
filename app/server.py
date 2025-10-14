@@ -1,25 +1,34 @@
+# server.py
+
 import os
-import tempfile
-import threading
 import json
+import tempfile
 import shutil
+import logging
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Optional, List
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
+# ------------------------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("ppstructurev3")
+
+# ------------------------------------------------------------------------------
+# Core configuration
+# ------------------------------------------------------------------------------
 ENABLE_HPI = False
 ENABLE_MKLDNN = True
 
-from paddleocr import PPStructureV3
+DEVICE = os.getenv("DEVICE", "cpu")
+CPU_THREADS = int(os.getenv("CPU_THREADS", "4"))
 
-# ================= Core Configuration (Pinned Values) =================
-DEVICE = "cpu"
-CPU_THREADS = 4
-
-# Optional accuracy boosters
+# Optional accuracy boosters (leave as-is unless you want to toggle them)
 USE_DOC_ORIENTATION_CLASSIFY = False
 USE_DOC_UNWARPING = False
 USE_TEXTLINE_ORIENTATION = False
@@ -29,47 +38,71 @@ USE_TABLE_RECOGNITION = False
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 
-# Model overrides
+# Model overrides (adjust if you need different models)
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_server_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
-TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
-FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
-CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters
-LAYOUT_THRESHOLD = 0.5
-TEXT_DET_THRESH = 0.3
-TEXT_DET_BOX_THRESH = 0.6
-TEXT_DET_UNCLIP_RATIO = 1.5
-TEXT_DET_LIMIT_SIDE_LEN = 960
-TEXT_DET_LIMIT_TYPE = "max"
-TEXT_REC_SCORE_THRESH = 0.5
-TEXT_RECOGNITION_BATCH_SIZE = 1
+# ------------------------------------------------------------------------------
+# Detection/recognition parameters (set to None to defer to library defaults)
+# These will only be passed to PPStructureV3 if not None.
+# ------------------------------------------------------------------------------
+LAYOUT_THRESHOLD: Optional[float] = None
+TEXT_DET_THRESH: Optional[float] = None
+TEXT_DET_BOX_THRESH: Optional[float] = None
+TEXT_DET_UNCLIP_RATIO: Optional[float] = None
+TEXT_DET_LIMIT_SIDE_LEN: Optional[int] = None
+TEXT_DET_LIMIT_TYPE: Optional[str] = None  # "max" or "min"
+TEXT_REC_SCORE_THRESH: Optional[float] = None
+TEXT_RECOGNITION_BATCH_SIZE: Optional[int] = None
 
-# I/O and service limits
-ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
-MAX_FILE_SIZE_MB = 50
-MAX_PARALLEL_PREDICT = 1
+# ------------------------------------------------------------------------------
+# Apply CPU thread/env hints
+# ------------------------------------------------------------------------------
+os.environ.setdefault("OMP_NUM_THREADS", str(CPU_THREADS))
+os.environ.setdefault("MKL_NUM_THREADS", str(CPU_THREADS))
+if ENABLE_MKLDNN:
+    os.environ.setdefault("FLAGS_use_mkldnn", "1")
 
-# ================= App & Lifespan =================
+# ------------------------------------------------------------------------------
+# Lazy import after env prepared
+# ------------------------------------------------------------------------------
+from paddleocr import PPStructureV3  # noqa: E402
+
+# ------------------------------------------------------------------------------
+# FastAPI app with lifespan to initialize pipeline once
+# ------------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pipeline = PPStructureV3(
+    # Log the configuration that will be used
+    logger.info(
+        "PPStructureV3 config: device=%s, cpu_threads=%s, mkldnn=%s, "
+        "layout_model=%s, text_det_model=%s, text_rec_model=%s",
+        DEVICE, CPU_THREADS, ENABLE_MKLDNN,
+        LAYOUT_DETECTION_MODEL_NAME, TEXT_DETECTION_MODEL_NAME, TEXT_RECOGNITION_MODEL_NAME,
+    )
+    logger.info(
+        "Params: layout_threshold=%s, text_det_thresh=%s, text_det_box_thresh=%s, "
+        "text_det_unclip_ratio=%s, text_det_limit_side_len=%s, text_det_limit_type=%s, "
+        "text_rec_score_thresh=%s, text_recognition_batch_size=%s",
+        LAYOUT_THRESHOLD, TEXT_DET_THRESH, TEXT_DET_BOX_THRESH,
+        TEXT_DET_UNCLIP_RATIO, TEXT_DET_LIMIT_SIDE_LEN, TEXT_DET_LIMIT_TYPE,
+        TEXT_REC_SCORE_THRESH, TEXT_RECOGNITION_BATCH_SIZE,
+    )
+
+    # Build kwargs for PPStructureV3, only including non-None overrides
+    base_kwargs = dict(
         device=DEVICE,
-        enable_mkldnn=ENABLE_MKLDNN,
-        enable_hpi=ENABLE_HPI,
-        cpu_threads=CPU_THREADS,
+        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+        use_doc_unwarping=USE_DOC_UNWARPING,
+        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+        use_table_recognition=USE_TABLE_RECOGNITION,
+        use_formula_recognition=USE_FORMULA_RECOGNITION,
+        use_chart_recognition=USE_CHART_RECOGNITION,
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
-        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
-        formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
-        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+        # The following are conditionally included below
         layout_threshold=LAYOUT_THRESHOLD,
         text_det_thresh=TEXT_DET_THRESH,
         text_det_box_thresh=TEXT_DET_BOX_THRESH,
@@ -78,138 +111,109 @@ async def lifespan(app: FastAPI):
         text_det_limit_type=TEXT_DET_LIMIT_TYPE,
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-        use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-        use_table_recognition=USE_TABLE_RECOGNITION,
-        use_formula_recognition=USE_FORMULA_RECOGNITION,
-        use_chart_recognition=USE_CHART_RECOGNITION,
     )
-    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
+    pp_kwargs = {k: v for k, v in base_kwargs.items() if v is not None or k in {
+        "device",
+        "use_doc_orientation_classify",
+        "use_doc_unwarping",
+        "use_textline_orientation",
+        "use_table_recognition",
+        "use_formula_recognition",
+        "use_chart_recognition",
+        "layout_detection_model_name",
+        "text_detection_model_name",
+        "text_recognition_model_name",
+    }}
+
+    pipeline = PPStructureV3(**pp_kwargs)
+    app.state.pipeline = pipeline
     yield
+    # No special teardown required
 
-app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
 
+app = FastAPI(lifespan=lifespan)
+
+
+# ------------------------------------------------------------------------------
+# Health endpoint
+# ------------------------------------------------------------------------------
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    cfg = {
+        "device": DEVICE,
+        "cpu_threads": CPU_THREADS,
+        "enable_mkldnn": ENABLE_MKLDNN,
+        "layout_detection_model_name": LAYOUT_DETECTION_MODEL_NAME,
+        "text_detection_model_name": TEXT_DETECTION_MODEL_NAME,
+        "text_recognition_model_name": TEXT_RECOGNITION_MODEL_NAME,
+        "layout_threshold": LAYOUT_THRESHOLD,
+        "text_det_thresh": TEXT_DET_THRESH,
+        "text_det_box_thresh": TEXT_DET_BOX_THRESH,
+        "text_det_unclip_ratio": TEXT_DET_UNCLIP_RATIO,
+        "text_det_limit_side_len": TEXT_DET_LIMIT_SIDE_LEN,
+        "text_det_limit_type": TEXT_DET_LIMIT_TYPE,
+        "text_rec_score_thresh": TEXT_REC_SCORE_THRESH,
+        "text_recognition_batch_size": TEXT_RECOGNITION_BATCH_SIZE,
+        "use_doc_orientation_classify": USE_DOC_ORIENTATION_CLASSIFY,
+        "use_doc_unwarping": USE_DOC_UNWARPING,
+        "use_textline_orientation": USE_TEXTLINE_ORIENTATION,
+        "use_table_recognition": USE_TABLE_RECOGNITION,
+        "use_formula_recognition": USE_FORMULA_RECOGNITION,
+        "use_chart_recognition": USE_CHART_RECOGNITION,
+    }
+    return JSONResponse({"status": "ok", "config": cfg})
 
+
+# ------------------------------------------------------------------------------
+# OCR parse endpoint
+# ------------------------------------------------------------------------------
 @app.post("/parse")
-async def parse_endpoint(
-    files: List[UploadFile] = File(...),
-    output_format: Optional[Literal["json", "markdown"]] = Query(default="json"),
-):
-    ofmt = (output_format or "json").lower()
-    if ofmt not in ("json", "markdown"):
-        ofmt = "json"
+async def parse(file: UploadFile = File(...)):
+    if file.content_type is None or not file.content_type.startswith(("image/", "application/pdf")):
+        raise HTTPException(status_code=400, detail="Only image/* or application/pdf is supported")
 
-    results = []
-    tmp_paths = []
-
+    tmpdir = tempfile.mkdtemp(prefix="ppstructv3_")
     try:
-        for f in files:
-            if not f.filename:
-                raise HTTPException(status_code=400, detail="Missing filename")
+        in_path = Path(tmpdir) / file.filename
+        with open(in_path, "wb") as out:
+            shutil.copyfileobj(file.file, out)
 
-            suffix = Path(f.filename).suffix.lower()
-            if suffix not in ALLOWED_EXTENSIONS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported file type: {suffix}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
-                )
+        def run_predict():
+            return app.state.pipeline.predict(str(in_path))
 
-            fd, tmp_path = tempfile.mkstemp(prefix="ppsv3_", suffix=suffix, dir="/tmp")
-            tmp_paths.append(tmp_path)
-            size = 0
-            with os.fdopen(fd, "wb") as out:
-                while True:
-                    chunk = await f.read(1 << 20)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    out.write(chunk)
-                    if size > MAX_FILE_SIZE_MB * 1024 * 1024:
-                        raise HTTPException(status_code=413, detail=f"File too large (>{MAX_FILE_SIZE_MB}MB)")
-            if size == 0:
-                raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        results = await run_in_threadpool(run_predict)
 
-            def _predict(path: str):
-                with app.state.predict_sem:
-                    return app.state.pipeline.predict(input=path)
-
-            try:
-                result = await run_in_threadpool(_predict, tmp_path)
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
-
-            if isinstance(result, (list, tuple)):
-                items = list(result)
+        # Try to serialize results gracefully
+        serializable = []
+        for res in results:
+            # Many PaddleOCR result objects have save_to_json/print helpers;
+            # here we attempt to access a dict-like representation if available.
+            item = {}
+            if hasattr(res, "to_dict"):
+                item = res.to_dict()
+            elif hasattr(res, "as_dict"):
+                item = res.as_dict()
+            elif hasattr(res, "__dict__"):
+                # Fallback best-effort; may contain non-serializable fields
+                item = {k: v for k, v in res.__dict__.items() if isinstance(v, (str, int, float, list, dict, bool, type(None)))}
             else:
-                try:
-                    items = list(result)
-                except TypeError:
-                    items = [result]
+                item = {"str": str(res)}
+            serializable.append(item)
 
-            if ofmt == "json":
-                docs = []
-                for res in items:
-                    if hasattr(res, "json"):
-                        docs.append(res.json)
-                    elif hasattr(res, "to_dict"):
-                        docs.append(res.to_dict())
-                    elif isinstance(res, dict):
-                        docs.append(res)
-                    else:
-                        docs.append(str(res))
-                results.append({"filename": f.filename, "documents": docs})
-            else:
-                markdown_infos = []
-                page_texts = []
-                for res in items:
-                    if hasattr(res, "markdown"):
-                        md = res.markdown
-                        if isinstance(md, dict):
-                            markdown_infos.append(md)
-                        elif isinstance(md, str):
-                            page_texts.append(md)
-                        else:
-                            page_texts.append(str(md))
-                    elif hasattr(res, "to_markdown"):
-                        page_texts.append(res.to_markdown())
-                    elif hasattr(res, "save_to_markdown"):
-                        outdir = tempfile.mkdtemp(prefix="ppsv3_md_")
-                        try:
-                            res.save_to_markdown(save_path=outdir)
-                            parts = []
-                            for name in sorted(os.listdir(outdir)):
-                                if name.endswith(".md"):
-                                    with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
-                                        parts.append(fh.read())
-                            page_texts.append("\n\n".join(parts) if parts else "")
-                        finally:
-                            shutil.rmtree(outdir, ignore_errors=True)
-                    else:
-                        page_texts.append(str(res))
-
-                if markdown_infos:
-                    try:
-                        combined_md = app.state.pipeline.concatenate_markdown_pages(markdown_infos)
-                    except Exception:
-                        combined_md = "\n\n".join(mi.get("text", "") for mi in markdown_infos)
-                else:
-                    combined_md = "\n\n".join(page_texts)
-
-                results.append({"filename": f.filename, "documents_markdown": [combined_md]})
-
-        if ofmt == "json":
-            return JSONResponse({"results": results})
-
-        body = "\n\n".join(f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) for item in results)
-        return PlainTextResponse(body, media_type="text/markdown")
-
+        return JSONResponse({"count": len(serializable), "results": serializable})
+    except Exception as e:
+        logger.exception("Prediction failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        for p in tmp_paths:
-            try:
-                os.unlink(p)
-            except FileNotFoundError:
-                pass
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+# ------------------------------------------------------------------------------
+# Root
+# ------------------------------------------------------------------------------
+@app.get("/")
+def root():
+    return PlainTextResponse("PPStructureV3 service is running")
