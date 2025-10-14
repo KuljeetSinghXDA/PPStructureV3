@@ -1,4 +1,4 @@
-FROM python:3.14-alpine
+FROM python:3.13.8-slim
 
 # Noninteractive apt to avoid debconf warnings
 ENV DEBIAN_FRONTEND=noninteractive \
