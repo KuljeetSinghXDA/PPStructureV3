@@ -17,7 +17,7 @@ from paddleocr import PPStructureV3
 
 # ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
-CPU_THREADS = 2
+CPU_THREADS = 4
 
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = False
@@ -42,12 +42,12 @@ CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 # Detection/recognition parameters
 LAYOUT_THRESHOLD = 0.3
 TEXT_DET_THRESH = 0.25
-TEXT_DET_BOX_THRESH = 0.5
-TEXT_DET_UNCLIP_RATIO = 2.4
-TEXT_DET_LIMIT_SIDE_LEN = 1280
+TEXT_DET_BOX_THRESH = 0.45
+TEXT_DET_UNCLIP_RATIO = 1.8
+TEXT_DET_LIMIT_SIDE_LEN = 1536
 TEXT_DET_LIMIT_TYPE = "max"
-TEXT_REC_SCORE_THRESH = 0.0
-TEXT_RECOGNITION_BATCH_SIZE = 4
+TEXT_REC_SCORE_THRESH = 0.40
+TEXT_RECOGNITION_BATCH_SIZE = 16
 
 
 # I/O and service limits
