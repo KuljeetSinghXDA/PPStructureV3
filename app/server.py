@@ -17,7 +17,7 @@ from paddleocr import PPStructureV3
 
 # ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
-CPU_THREADS = 4
+CPU_THREADS = 2
 
 # Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = False
