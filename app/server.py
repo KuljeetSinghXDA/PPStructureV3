@@ -18,26 +18,28 @@ from PIL import Image, UnidentifiedImageError
 
 from paddleocr import PPStructureV3
 
-# ================= ARM64-aware defaults =================
+# ================= Ampere A1 (ARM64) defaults for best English accuracy =================
+# 4 OCPU ≈ 8 vCPU -> set 8 threads
 DEVICE = "cpu"
-CPU_THREADS = 4
+CPU_THREADS = 8
 
-# Subpipelines
-USE_DOC_ORIENTATION_CLASSIFY = False
-USE_DOC_UNWARPING = False
-USE_TEXTLINE_ORIENTATION = False
+# Subpipelines: maximize robustness on scanned lab reports
+USE_DOC_ORIENTATION_CLASSIFY = True
+USE_DOC_UNWARPING = True
+USE_TEXTLINE_ORIENTATION = True
 USE_TABLE_RECOGNITION = True
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 USE_SEAL_RECOGNITION = False
 USE_REGION_DETECTION = True
 
-# Models
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
-TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
+# Models (accuracy-first)
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout_plus-L"        # large, more accurate
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_server_det"         # server-grade det
+TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_server_rec"    # server-grade rec (English)
+# Prefer SLANeXt family for higher table structure fidelity
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANeXt_wired"
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANeXt_wired"  # use wired if wireless not available; can override
 TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 WIRED_TABLE_CELLS_DET_MODEL_NAME = None
 WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
@@ -47,7 +49,7 @@ SEAL_TEXT_DETECTION_MODEL_NAME = None
 SEAL_TEXT_RECOGNITION_MODEL_NAME = None
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Optional model dirs
+# Optional local model dirs (set to None; override via query if needed)
 LAYOUT_DETECTION_MODEL_DIR = None
 REGION_DETECTION_MODEL_DIR = None
 TEXT_DETECTION_MODEL_DIR = None
@@ -66,17 +68,18 @@ SEAL_TEXT_DETECTION_MODEL_DIR = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
 CHART_RECOGNITION_MODEL_DIR = None
 
-# Thresholds / sizes / batches
+# Thresholds / sizes / batches (tuned for recall on dense forms)
 LAYOUT_THRESHOLD = None
 LAYOUT_NMS = None
 LAYOUT_UNCLIP_RATIO = None
 LAYOUT_MERGE_BBOXES_MODE = None
 
+# Larger side length for better recall on small fonts in labs; adjust if memory constrained
+TEXT_DET_LIMIT_SIDE_LEN = 2048
+TEXT_DET_LIMIT_TYPE = "max"
 TEXT_DET_THRESH = None
 TEXT_DET_BOX_THRESH = None
 TEXT_DET_UNCLIP_RATIO = None
-TEXT_DET_LIMIT_SIDE_LEN = None
-TEXT_DET_LIMIT_TYPE = None
 
 SEAL_DET_LIMIT_SIDE_LEN = None
 SEAL_DET_LIMIT_TYPE = None
@@ -85,15 +88,16 @@ SEAL_DET_BOX_THRESH = None
 SEAL_DET_UNCLIP_RATIO = None
 SEAL_REC_SCORE_THRESH = None
 
+# Increase rec batch size to utilize 8 vCPUs
 TEXT_REC_SCORE_THRESH = None
-TEXT_RECOGNITION_BATCH_SIZE = None
-TEXTLINE_ORIENTATION_BATCH_SIZE = None
-FORMULA_RECOGNITION_BATCH_SIZE = None
-CHART_RECOGNITION_BATCH_SIZE = None
-SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
+TEXT_RECOGNITION_BATCH_SIZE = 16
+TEXTLINE_ORIENTATION_BATCH_SIZE = 16
+FORMULA_RECOGNITION_BATCH_SIZE = 8
+CHART_RECOGNITION_BATCH_SIZE = 4
+SEAL_TEXT_RECOGNITION_BATCH_SIZE = 8
 
 # Backend knobs (ARM64-friendly)
-ENABLE_HPI = False  # HPI not supported on ARM64 currently
+ENABLE_HPI = False  # x86-64 oriented; keep off on ARM64
 _ENABLE_MKLDNN_DEFAULT = platform.machine().lower() in ("x86_64", "amd64")
 ENABLE_MKLDNN = bool(int(os.getenv("ENABLE_MKLDNN", "1" if _ENABLE_MKLDNN_DEFAULT else "0")))
 USE_TENSORRT = False
@@ -121,6 +125,9 @@ def _build_config_key(params: Dict[str, Any]) -> Tuple[Tuple[str, Any], ...]:
     return tuple(sorted((k, v) for k, v in params.items()))
 
 def _make_pipeline(**kwargs) -> PPStructureV3:
+    # Strong suggestion: also export OMP_NUM_THREADS for deterministic CPU usage
+    os.environ.setdefault("OMP_NUM_THREADS", str(CPU_THREADS))
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     return PPStructureV3(**kwargs)
 
 def _open_image_any(val: Union[Image.Image, bytes, str]) -> Optional[Image.Image]:
@@ -152,7 +159,6 @@ def _page_json_with_fallback(res) -> Dict[str, Any]:
     j = getattr(res, "json", None)
     if isinstance(j, dict):
         return j
-    # Fallback for nightlies: persist and read the last JSON
     with tempfile.TemporaryDirectory() as td:
         try:
             res.save_to_json(save_path=td)
@@ -278,7 +284,7 @@ async def lifespan(app: FastAPI):
     app.state.pipeline_cache = OrderedDict()
     yield
 
-app = FastAPI(title="PPStructureV3 /parse API", version="1.9.0", lifespan=lifespan)
+app = FastAPI(title="PPStructureV3 /parse API (A1 optimized)", version="2.0.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
@@ -296,13 +302,9 @@ def _get_or_create_pipeline(app: FastAPI, effective: Dict[str, Any]) -> PPStruct
     while len(cache) >= PIPELINE_CACHE_SIZE:
         cache.popitem(last=False)
     base_defaults = dict(
-        device=DEVICE,
-        enable_mkldnn=ENABLE_MKLDNN,
-        enable_hpi=ENABLE_HPI,
-        use_tensorrt=USE_TENSORRT,
-        precision=PRECISION,
-        mkldnn_cache_capacity=MKLDNN_CACHE_CAPACITY,
-        cpu_threads=CPU_THREADS,
+        device=DEVICE, enable_mkldnn=ENABLE_MKLDNN, enable_hpi=ENABLE_HPI,
+        use_tensorrt=USE_TENSORRT, precision=PRECISION,
+        mkldnn_cache_capacity=MKLDNN_CACHE_CAPACITY, cpu_threads=CPU_THREADS,
         paddlex_config=PADDLEX_CONFIG,
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
@@ -312,21 +314,15 @@ def _get_or_create_pipeline(app: FastAPI, effective: Dict[str, Any]) -> PPStruct
         table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
         formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
         chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-        layout_threshold=LAYOUT_THRESHOLD,
-        text_det_thresh=TEXT_DET_THRESH,
-        text_det_box_thresh=TEXT_DET_BOX_THRESH,
-        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
+        layout_threshold=LAYOUT_THRESHOLD, text_det_thresh=TEXT_DET_THRESH,
+        text_det_box_thresh=TEXT_DET_BOX_THRESH, text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
+        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN, text_det_limit_type=TEXT_DET_LIMIT_TYPE,
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-        use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-        use_table_recognition=USE_TABLE_RECOGNITION,
-        use_formula_recognition=USE_FORMULA_RECOGNITION,
-        use_chart_recognition=USE_CHART_RECOGNITION,
-        use_seal_recognition=USE_SEAL_RECOGNITION,
+        use_doc_unwarping=USE_DOC_UNWARPING, use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+        use_table_recognition=USE_TABLE_RECOGNITION, use_formula_recognition=USE_FORMULA_RECOGNITION,
+        use_chart_recognition=USE_CHART_RECOGNITION, use_seal_recognition=USE_SEAL_RECOGNITION,
         use_region_detection=USE_REGION_DETECTION,
     )
     base_defaults.update(effective)
@@ -439,7 +435,7 @@ async def parse(
     seal_det_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
     seal_det_box_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
     seal_det_unclip_ratio: Optional[float] = Query(None, gt=0.0),
-    # Predict-time table behavior
+    # Predict-time table behavior only
     use_ocr_results_with_table_cells: Optional[bool] = Query(None),
     use_e2e_wired_table_rec_model: Optional[bool] = Query(None),
     use_e2e_wireless_table_rec_model: Optional[bool] = Query(None),
@@ -458,7 +454,6 @@ async def parse(
         with open(tmp_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
-        # Build constructor overrides (only documented init args)
         effective: Dict[str, Any] = {}
         for k, v in dict(
             device=device, enable_mkldnn=enable_mkldnn, enable_hpi=enable_hpi,
@@ -493,11 +488,10 @@ async def parse(
             seal_text_detection_model_name=seal_text_detection_model_name, seal_text_detection_model_dir=seal_text_detection_model_dir,
             seal_text_recognition_model_name=seal_text_recognition_model_name, seal_text_recognition_model_dir=seal_text_recognition_model_dir,
             layout_threshold=layout_threshold, layout_nms=layout_nms, layout_unclip_ratio=layout_unclip_ratio,
-            layout_merge_bboxes_mode=layout_merge_bboxes_mode,
-            text_det_limit_side_len=text_det_limit_side_len, text_det_limit_type=text_det_limit_type,
-            text_det_thresh=text_det_thresh, text_det_box_thresh=text_det_box_thresh, text_det_unclip_ratio=text_det_unclip_ratio,
-            text_rec_score_thresh=text_rec_score_thresh, text_recognition_batch_size=text_recognition_batch_size,
-            textline_orientation_batch_size=textline_orientation_batch_size,
+            layout_merge_bboxes_mode=layout_merge_bboxes_mode, text_det_limit_side_len=text_det_limit_side_len,
+            text_det_limit_type=text_det_limit_type, text_det_thresh=text_det_thresh, text_det_box_thresh=text_det_box_thresh,
+            text_det_unclip_ratio=text_det_unclip_ratio, text_rec_score_thresh=text_rec_score_thresh,
+            text_recognition_batch_size=text_recognition_batch_size, textline_orientation_batch_size=textline_orientation_batch_size,
             formula_recognition_batch_size=formula_recognition_batch_size, chart_recognition_batch_size=chart_recognition_batch_size,
             seal_text_recognition_batch_size=seal_text_recognition_batch_size, seal_rec_score_thresh=seal_rec_score_thresh,
             seal_det_limit_side_len=seal_det_limit_side_len, seal_det_limit_type=seal_det_limit_type,
