@@ -138,7 +138,6 @@ async def lifespan(app: FastAPI):
             use_table_recognition=USE_TABLE_RECOGNITION,
             use_formula_recognition=USE_FORMULA_RECOGNITION,
             use_chart_recognition=USE_CHART_RECOGNITION,
-            use_chart_parsing=USE_CHART_PARSING,  # New in v3.2.0
         )
         
         app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
