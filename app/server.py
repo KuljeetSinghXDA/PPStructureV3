@@ -104,84 +104,146 @@ async def parse(
         description="If input is PDF and output includes markdown, combine pages into one Markdown string",
     ),
 ):
+    """
+    Parse uploaded documents using PPStructureV3 pipeline.
+    
+    Returns structured JSON and/or Markdown representation of the document.
+    For PDFs, can optionally concatenate all pages into a single Markdown string.
+    """
     # Validate filename and extension
     if not file.filename:
         raise HTTPException(status_code=400, detail="Filename is required")
+    
     ext = Path(file.filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Unsupported file type: {ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+        )
 
-    # Stream to a unique temp directory
+    # Create temporary directory for this request
     tmp_dir = tempfile.mkdtemp(prefix="ppsv3_")
     dst_path = Path(tmp_dir) / Path(file.filename).name
     max_bytes = int(MAX_FILE_SIZE_MB * 1024 * 1024)
 
-    total = 0
+    total_bytes = 0
     try:
+        # Stream file to disk with size validation
         with open(dst_path, "wb") as out:
             while True:
-                chunk = await file.read(1024 * 1024)
+                chunk = await file.read(1024 * 1024)  # 1MB chunks
                 if not chunk:
                     break
-                total += len(chunk)
-                if total > max_bytes:
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
                     raise HTTPException(
                         status_code=413,
-                        detail=f"File too large (> {MAX_FILE_SIZE_MB} MB)",
+                        detail=f"File exceeds maximum size of {MAX_FILE_SIZE_MB} MB",
                     )
                 out.write(chunk)
+        
         await file.close()
 
-        # Guarded synchronous inference in the threadpool
+        # Execute inference with semaphore-guarded threadpool
         sem = app.state.predict_sem
 
         async def _predict(path_str: str):
+            """Run blocking predict call in threadpool with concurrency control"""
             await run_in_threadpool(sem.acquire)
             try:
                 return await run_in_threadpool(app.state.pipeline.predict, path_str)
             finally:
                 sem.release()
 
-        outputs = await _predict(str(dst_path))
+        # Get results (list of result objects, one per page for PDFs)
+        results = await _predict(str(dst_path))
+        
+        # Convert generator to list if needed
+        if not isinstance(results, list):
+            results = list(results)
 
-        # Build response
+        # Build response payload
         is_pdf = ext == ".pdf"
-        resp = {
+        response_data = {
             "filename": Path(file.filename).name,
             "extension": ext,
-            "size_bytes": total,
-            "output": output,
+            "size_bytes": total_bytes,
+            "num_pages": len(results),
+            "output_format": output,
         }
 
-        # JSON payload from result objects (dicts)
+        # Extract JSON data from result objects
         if output in ("json", "both"):
             try:
-                pages_json = [res.json for res in outputs]
+                # Access the json attribute of each result object
+                pages_json = []
+                for res in results:
+                    pages_json.append(res.json)
+                response_data["pages_json"] = pages_json
             except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Failed to build JSON output: {e}")
-            resp["pages_json"] = pages_json
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Failed to extract JSON from results: {str(e)}"
+                )
 
-        # Markdown payloads: either list of per-page dicts or single concatenated string for PDFs
+        # Extract Markdown data from result objects
         if output in ("markdown", "both"):
             try:
-                md_list = [res.markdown for res in outputs]
-                if is_pdf and combine_pdf_pages:
-                    # Return a single markdown string
-                    md_text = app.state.pipeline.concatenate_markdown_pages(md_list)
-                    resp["markdown"] = md_text
+                # Each result.markdown is a dict with 'markdown_texts' key
+                markdown_dicts = [res.markdown for res in results]
+                
+                if is_pdf and combine_pdf_pages and len(markdown_dicts) > 1:
+                    # Attempt to concatenate pages using pipeline method
+                    try:
+                        # Try standard method first
+                        try:
+                            combined_md = app.state.pipeline.concatenate_markdown_pages(markdown_dicts)
+                        except AttributeError:
+                            # Fallback for known bug in some versions
+                            combined_md = app.state.pipeline.paddlex_pipeline.concatenate_markdown_pages(markdown_dicts)
+                        
+                        response_data["markdown"] = combined_md
+                    except Exception as concat_error:
+                        # Manual fallback: extract markdown_texts and join with page breaks
+                        markdown_texts = []
+                        for idx, md_dict in enumerate(markdown_dicts):
+                            if isinstance(md_dict, dict) and "markdown_texts" in md_dict:
+                                markdown_texts.append(md_dict["markdown_texts"])
+                            elif isinstance(md_dict, str):
+                                markdown_texts.append(md_dict)
+                        
+                        response_data["markdown"] = "\n\n---\n\n".join(markdown_texts)
+                        response_data["concatenation_note"] = "Manual concatenation used due to API limitation"
                 else:
-                    # Return raw per-page markdown dicts (contain text and embedded image mappings)
-                    resp["markdown_pages"] = md_list
+                    # Return per-page markdown (list of dicts or extracted texts)
+                    if combine_pdf_pages and len(markdown_dicts) == 1:
+                        # Single page: return just the text
+                        md = markdown_dicts[0]
+                        if isinstance(md, dict) and "markdown_texts" in md:
+                            response_data["markdown"] = md["markdown_texts"]
+                        else:
+                            response_data["markdown"] = md
+                    else:
+                        # Multiple pages without combination: return structured dicts
+                        response_data["markdown_pages"] = markdown_dicts
+                        
             except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Failed to build Markdown output: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to extract Markdown from results: {str(e)}"
+                )
 
-        return JSONResponse(resp)
+        return JSONResponse(response_data)
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Inference failed: {str(e)}"
+        )
     finally:
+        # Always cleanup temp directory
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
