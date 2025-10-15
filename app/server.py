@@ -3,15 +3,13 @@ import tempfile
 import threading
 import json
 import shutil
-import base64
-import io
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Optional, Literal
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-from PIL import Image
 
 ENABLE_HPI = False
 ENABLE_MKLDNN = True
@@ -57,11 +55,37 @@ ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
 
-def pil_to_base64(img: Image.Image) -> str:
-    """Convert PIL Image to base64 string."""
-    buf = io.BytesIO()
-    img.save(buf, format='PNG')
-    return base64.b64encode(buf.getvalue()).decode('utf-8')
+# ================= Utilities =================
+def _ext_ok(name: str) -> bool:
+    return Path(name).suffix.lower() in ALLOWED_EXTENSIONS
+
+def _ensure_size_and_save(upload: UploadFile, dst_path: Path, max_mb: int) -> None:
+    max_bytes = max_mb * 1024 * 1024
+    total = 0
+    with dst_path.open("wb") as out:
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(status_code=413, detail=f"File exceeds {max_mb} MB limit")
+            out.write(chunk)
+    upload.file.seek(0)
+
+def _result_to_dict(res) -> dict:
+    # Prefer stable dictionary extraction without disk I/O
+    if hasattr(res, "to_dict") and callable(getattr(res, "to_dict")):
+        return res.to_dict()
+    if hasattr(res, "res"):
+        return res.res
+    # Fallback: use string representation if available
+    try:
+        s = str(res)
+        # Not guaranteed JSON, best-effort
+        return {"repr": s}
+    except Exception:
+        return {}
 
 # ================= App & Lifespan =================
 @asynccontextmanager
@@ -71,7 +95,6 @@ async def lifespan(app: FastAPI):
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
         cpu_threads=CPU_THREADS,
-        lang="en",  # English for optimal text recognition
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
@@ -104,78 +127,60 @@ app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifesp
 def health():
     return {"status": "ok"}
 
-@app.post("/parse")
+@app.post("/parse", response_class=JSONResponse)
 async def parse(
-    file: UploadFile = File(..., description="Document file (image or PDF)"),
-    output_format: Literal["json", "markdown"] = Query("json", description="Output format"),
-    visualize: bool = Query(False, description="Include base64-encoded visualization images")
+    file: Optional[UploadFile] = File(None),
+    url: Optional[str] = Query(default=None, description="Direct image/PDF URL supported by PP-StructureV3"),
+    response_format: Literal["json"] = Query(default="json"),
 ):
-    # Validate file
-    filename = file.filename.lower()
-    if not any(filename.endswith(ext) for ext in ALLOWED_EXTENSIONS):
-        raise HTTPException(status_code=400, detail="Invalid file type. Supported: " + ", ".join(ALLOWED_EXTENSIONS))
-    
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large (max 50MB)")
+    if not file and not url:
+        raise HTTPException(status_code=422, detail="Provide either an uploaded file or a URL")
 
-    # Create temp file
-    suffix = Path(filename).suffix
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-        tmp_file.write(content)
-        tmp_path = Path(tmp_file.name)
-
-    sem = app.state.predict_sem
-    if not sem.acquire(blocking=False):
-        raise HTTPException(status_code=429, detail="Too many concurrent requests. Max parallel: 1")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ppstructv3_"))
+    save_path = None
+    input_path: str
 
     try:
-        # Run prediction in threadpool
-        results = await run_in_threadpool(app.state.pipeline.predict, str(tmp_path))
-        
-        # Handle single or multi-page output
-        if len(results) == 0:
-            raise HTTPException(status_code=500, detail="No results from pipeline")
+        if file:
+            if not file.filename:
+                raise HTTPException(status_code=422, detail="Uploaded file has no filename")
+            if not _ext_ok(file.filename):
+                raise HTTPException(status_code=422, detail=f"Unsupported file type: {Path(file.filename).suffix}")
+            save_path = tmp_dir / Path(file.filename).name
+            _ensure_size_and_save(file, save_path, MAX_FILE_SIZE_MB)
+            input_path = str(save_path)
+        else:
+            # URL path goes directly to pipeline
+            input_path = url  # type: ignore
 
-        output = {}
-        
-        if output_format == "json":
-            output["pages"] = []
-            for i, res in enumerate(results):
-                page_res = res.json["res"].copy()  # Deep copy to avoid mutations
-                
-                if visualize:
-                    vis_dir = tempfile.mkdtemp()
-                    try:
-                        res.save_to_img(save_path=vis_dir)
-                        page_res["visualizations"] = {}
-                        for vis_file in Path(vis_dir).iterdir():
-                            if vis_file.suffix.lower() == ".png":
-                                with Image.open(vis_file) as img:
-                                    page_res["visualizations"][vis_file.name] = pil_to_base64(img)
-                    finally:
-                        shutil.rmtree(vis_dir, ignore_errors=True)
-                
-                output["pages"].append(page_res)
-        
-        elif output_format == "markdown":
-            if len(results) > 1:
-                # Merge multi-page markdown
-                from paddleocr import PPStructureV3
-                merged_md = PPStructureV3.concatenate_markdown_pages([r.markdown for r in results])
-                output["text"] = merged_md["markdown_texts"]
-                output["images"] = {k: pil_to_base64(v) for k, v in merged_md["markdown_images"].items()}
-                output["page_continuation_flags"] = merged_md["page_continuation_flags"]
-            else:
-                # Single page
-                md = results[0].markdown
-                output["text"] = md["markdown_texts"]
-                output["images"] = {k: pil_to_base64(v) for k, v in md["markdown_images"].items()}
-                output["page_continuation_flags"] = md["page_continuation_flags"]
-        
-        return JSONResponse(content=output)
-    
+        # Acquire semaphore in threadpool to avoid blocking event loop
+        await run_in_threadpool(app.state.predict_sem.acquire)
+
+        def _run_predict():
+            return app.state.pipeline.predict(input=input_path)
+
+        outputs = await run_in_threadpool(_run_predict)
+
+        # Build response
+        pages = []
+        for res in outputs:
+            pages.append(_result_to_dict(res))
+
+        return {"pages": pages}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
     finally:
-        # Cleanup
-        sem.release()
-        os.unlink(tmp_path)
+        # Always release semaphore and clean up temp files
+        try:
+            if getattr(app.state, "predict_sem", None):
+                app.state.predict_sem.release()
+        except Exception:
+            pass
+        try:
+            if save_path and save_path.exists():
+                # remove temp dir recursively
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
