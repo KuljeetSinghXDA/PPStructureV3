@@ -1,17 +1,18 @@
 # fastapi_app.py
 import os
+import json
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Literal
+from typing import List, Optional, Literal
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-from contextlib import asynccontextmanager
 
-# Models: PaddleOCR PP-StructureV3
+# PaddleOCR PP-StructureV3 pipeline
 from paddleocr import PPStructureV3
 
 # ================= Service Configuration =================
@@ -39,14 +40,14 @@ FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
 # Detection/recognition parameters (high recall but CPU-friendly)
-LAYOUT_THRESHOLD = None
-TEXT_DET_THRESH = None
-TEXT_DET_BOX_THRESH = None
-TEXT_DET_UNCLIP_RATIO = None
-TEXT_DET_LIMIT_SIDE_LEN = None
-TEXT_DET_LIMIT_TYPE = None
-TEXT_REC_SCORE_THRESH = None
-TEXT_RECOGNITION_BATCH_SIZE = None
+LAYOUT_THRESHOLD = 0.05
+TEXT_DET_THRESH = 0.12
+TEXT_DET_BOX_THRESH = 0.30
+TEXT_DET_UNCLIP_RATIO = 2.6
+TEXT_DET_LIMIT_SIDE_LEN = 2048
+TEXT_DET_LIMIT_TYPE = "max"
+TEXT_REC_SCORE_THRESH = 0.25
+TEXT_RECOGNITION_BATCH_SIZE = 12
 
 # I/O and limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
@@ -57,13 +58,13 @@ MAX_PARALLEL_PREDICT = 1  # tuned for CPU-only
 PDF_DPI_DEFAULT = 300  # 300–400 DPI recommended for small text
 
 # ================= FastAPI App and Lifespan =================
-app = FastAPI(title="PPStructureV3 OCR API", version="2.0.0")
+app = FastAPI(title="PPStructureV3 OCR API", version="2.2.0")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import threading
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
-    # Initialize a single, long-lived pipeline (recommended in docs/tech report)
+    # Single long-lived pipeline
     app.state.pipeline = PPStructureV3(
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
@@ -132,7 +133,7 @@ def _parse_page_range(page_range_str: Optional[str], num_pages: int) -> List[int
     return sorted([i for i in selected if 0 <= i < num_pages])
 
 def _rasterize_pdf_pymupdf(pdf_path: Path, out_dir: Path, dpi: int, page_indices: Optional[List[int]] = None) -> List[Path]:
-    import fitz
+    import fitz  # PyMuPDF
     doc = fitz.open(pdf_path.as_posix())
     try:
         n = doc.page_count
@@ -162,7 +163,7 @@ async def parse(
 ):
     ext = _validate_upload(file)
 
-    # Persist upload in a temp directory via streaming
+    # Persist upload via streaming writes
     temp_dir = tempfile.mkdtemp(prefix="ppsv3_")
     try:
         src_path = Path(temp_dir) / ("upload" + ext)
@@ -181,16 +182,14 @@ async def parse(
         if size == 0:
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-        # Prepare inputs for pipeline.predict
+        # Build input list: pre-render PDFs at requested DPI
         inputs: List[str] = []
         if ext == ".pdf":
-            # High-DPI pre-render
-            out_dir = Path(temp_dir) / "pages"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            # Resolve pages
             import fitz
             with fitz.open(src_path.as_posix()) as doc:
                 pages = _parse_page_range(page_range, doc.page_count)
+            out_dir = Path(temp_dir) / "pages"
+            out_dir.mkdir(parents=True, exist_ok=True)
             img_paths = _rasterize_pdf_pymupdf(src_path, out_dir, dpi=dpi, page_indices=pages)
             if not img_paths:
                 return JSONResponse({"filename": file.filename, "message": "No pages selected"}, status_code=200)
@@ -203,9 +202,10 @@ async def parse(
         if use_chart_recognition is not None:
             predict_kwargs["use_chart_recognition"] = use_chart_recognition
 
-        # Call OCR under concurrency guard
+        # Run inference under semaphore + threadpool
         with app.state.predict_sem:
             try:
+                # Use documented 'input' keyword
                 results = await run_in_threadpool(app.state.pipeline.predict, input=inputs, **predict_kwargs)
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"OCR failed: {e}")
@@ -213,32 +213,42 @@ async def parse(
         if not isinstance(results, (list, tuple)):
             results = [results]
 
-        # Format output
+        # Markdown path: canonical concatenation with fallbacks
         if output_format == "markdown":
-            parts: List[str] = []
+            markdown_list = []
             for res in results:
-                if hasattr(res, "markdown"):
-                    md = res.markdown
-                    parts.append(md if isinstance(md, str) else str(md))
-                elif hasattr(res, "to_markdown"):
-                    parts.append(res.to_markdown())
-                else:
-                    parts.append(str(getattr(res, "text", "")))
-            concatenated = "\n\n---\n\n".join(parts)
-            return PlainTextResponse(concatenated, media_type="text/markdown")
+                md = getattr(res, "markdown", None)
+                if md is None:
+                    md = {"text": str(getattr(res, "text", "")), "markdown_images": {}}
+                markdown_list.append(md)
 
-        # Default: json
-        pages_out: List[dict] = []
+            concatenated_md = ""
+            try:
+                concatenated_md = app.state.pipeline.concatenate_markdown_pages(markdown_list)
+            except AttributeError:
+                try:
+                    concatenated_md = app.state.pipeline.paddlex_pipeline.concatenate_markdown_pages(markdown_list)
+                except Exception:
+                    concatenated_md = "\n\n---\n\n".join([md.get("text", "") for md in markdown_list])
+
+            return PlainTextResponse(concatenated_md, media_type="text/markdown")
+
+        # JSON path: serialize via save_to_json for version compatibility
+        tmp_json_dir = Path(temp_dir) / "json"
+        tmp_json_dir.mkdir(parents=True, exist_ok=True)
+        pages_out = []
         for idx, res in enumerate(results, start=1):
-            if hasattr(res, "to_dict"):
-                d = res.to_dict()
-            elif hasattr(res, "json"):
-                d = res.json
-            elif isinstance(res, dict):
-                d = res
+            before = set(tmp_json_dir.glob("*.json"))
+            res.save_to_json(save_path=tmp_json_dir.as_posix())
+            after = set(tmp_json_dir.glob("*.json"))
+            new_files = sorted(list(after - before))
+            data = None
+            if new_files:
+                latest = new_files[-1]
+                data = json.loads(latest.read_text(encoding="utf-8"))
             else:
-                d = {"result": str(res)}
-            pages_out.append({"index": idx, "data": d})
+                data = {"result": str(getattr(res, "text", ""))}
+            pages_out.append({"index": idx, "data": data})
 
         return JSONResponse({"filename": file.filename, "pages": pages_out})
 
@@ -246,5 +256,5 @@ async def parse(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 if __name__ == "__main__":
-    # Optional: run with `uvicorn fastapi_app:app --host 0.0.0.0 --port 8000`
+    # Run with: uvicorn fastapi_app:app --host 0.0.0.0 --port 8000
     uvicorn.run(app, host="0.0.0.0", port=8000)
