@@ -30,14 +30,14 @@ USE_FORMULA_RECOGNITION = None
 USE_CHART_RECOGNITION = None
 
 # Model overrides
-LAYOUT_DETECTION_MODEL_NAME = None
-TEXT_DETECTION_MODEL_NAME = None
-TEXT_RECOGNITION_MODEL_NAME = None
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
-TABLE_CLASSIFICATION_MODEL_NAME = None
-FORMULA_RECOGNITION_MODEL_NAME = None
-CHART_RECOGNITION_MODEL_NAME = None
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
+TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
+TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
+FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
+CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
 # Detection/recognition parameters
 LAYOUT_THRESHOLD = None
@@ -96,121 +96,94 @@ def health():
     return {"status": "ok"}
 
 @app.post("/parse")
-async def parse_endpoint(
-    files: List[UploadFile] = File(...),
-    output_format: Optional[Literal["json", "markdown"]] = Query(default="json"),
+@app.post("/parse")
+async def parse(
+    file: UploadFile = File(..., description="PDF or image to parse"),
+    output: Literal["json", "markdown", "both"] = Query("json", description="Response content type"),
+    combine_pdf_pages: bool = Query(
+        True,
+        description="If input is PDF and output includes markdown, combine pages into one Markdown string",
+    ),
 ):
-    ofmt = (output_format or "json").lower()
-    if ofmt not in ("json", "markdown"):
-        ofmt = "json"
+    # Validate filename and extension
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
 
-    results = []
-    tmp_paths = []
+    # Stream to a unique temp directory
+    tmp_dir = tempfile.mkdtemp(prefix="ppsv3_")
+    dst_path = Path(tmp_dir) / Path(file.filename).name
+    max_bytes = int(MAX_FILE_SIZE_MB * 1024 * 1024)
 
+    total = 0
     try:
-        for f in files:
-            if not f.filename:
-                raise HTTPException(status_code=400, detail="Missing filename")
+        with open(dst_path, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large (> {MAX_FILE_SIZE_MB} MB)",
+                    )
+                out.write(chunk)
+        await file.close()
 
-            suffix = Path(f.filename).suffix.lower()
-            if suffix not in ALLOWED_EXTENSIONS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported file type: {suffix}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
-                )
+        # Guarded synchronous inference in the threadpool
+        sem = app.state.predict_sem
 
-            fd, tmp_path = tempfile.mkstemp(prefix="ppsv3_", suffix=suffix, dir="/tmp")
-            tmp_paths.append(tmp_path)
-            size = 0
-            with os.fdopen(fd, "wb") as out:
-                while True:
-                    chunk = await f.read(1 << 20)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    out.write(chunk)
-                    if size > MAX_FILE_SIZE_MB * 1024 * 1024:
-                        raise HTTPException(status_code=413, detail=f"File too large (>{MAX_FILE_SIZE_MB}MB)")
-            if size == 0:
-                raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
-            def _predict(path: str):
-                with app.state.predict_sem:
-                    return app.state.pipeline.predict(input=path)
-
+        async def _predict(path_str: str):
+            await run_in_threadpool(sem.acquire)
             try:
-                result = await run_in_threadpool(_predict, tmp_path)
+                return await run_in_threadpool(app.state.pipeline.predict, path_str)
+            finally:
+                sem.release()
+
+        outputs = await _predict(str(dst_path))
+
+        # Build response
+        is_pdf = ext == ".pdf"
+        resp = {
+            "filename": Path(file.filename).name,
+            "extension": ext,
+            "size_bytes": total,
+            "output": output,
+        }
+
+        # JSON payload from result objects (dicts)
+        if output in ("json", "both"):
+            try:
+                pages_json = [res.json for res in outputs]
             except Exception as e:
-                raise HTTPException(status_code=500, detail=f"OCR processing failed for {f.filename}: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to build JSON output: {e}")
+            resp["pages_json"] = pages_json
 
-            if isinstance(result, (list, tuple)):
-                items = list(result)
-            else:
-                try:
-                    items = list(result)
-                except TypeError:
-                    items = [result]
-
-            if ofmt == "json":
-                docs = []
-                for res in items:
-                    if hasattr(res, "json"):
-                        docs.append(res.json)
-                    elif hasattr(res, "to_dict"):
-                        docs.append(res.to_dict())
-                    elif isinstance(res, dict):
-                        docs.append(res)
-                    else:
-                        docs.append(str(res))
-                results.append({"filename": f.filename, "documents": docs})
-            else:
-                markdown_infos = []
-                page_texts = []
-                for res in items:
-                    if hasattr(res, "markdown"):
-                        md = res.markdown
-                        if isinstance(md, dict):
-                            markdown_infos.append(md)
-                        elif isinstance(md, str):
-                            page_texts.append(md)
-                        else:
-                            page_texts.append(str(md))
-                    elif hasattr(res, "to_markdown"):
-                        page_texts.append(res.to_markdown())
-                    elif hasattr(res, "save_to_markdown"):
-                        outdir = tempfile.mkdtemp(prefix="ppsv3_md_")
-                        try:
-                            res.save_to_markdown(save_path=outdir)
-                            parts = []
-                            for name in sorted(os.listdir(outdir)):
-                                if name.endswith(".md"):
-                                    with open(os.path.join(outdir, name), "r", encoding="utf-8") as fh:
-                                        parts.append(fh.read())
-                            page_texts.append("\n\n".join(parts) if parts else "")
-                        finally:
-                            shutil.rmtree(outdir, ignore_errors=True)
-                    else:
-                        page_texts.append(str(res))
-
-                if markdown_infos:
-                    try:
-                        combined_md = app.state.pipeline.concatenate_markdown_pages(markdown_infos)
-                    except Exception:
-                        combined_md = "\n\n".join(mi.get("text", "") for mi in markdown_infos)
-                else:
-                    combined_md = "\n\n".join(page_texts)
-
-                results.append({"filename": f.filename, "documents_markdown": [combined_md]})
-
-        if ofmt == "json":
-            return JSONResponse({"results": results})
-
-        body = "\n\n".join(f"# {item['filename']}\n\n" + "\n\n".join(item["documents_markdown"]) for item in results)
-        return PlainTextResponse(body, media_type="text/markdown")
-
-    finally:
-        for p in tmp_paths:
+        # Markdown payloads: either list of per-page dicts or single concatenated string for PDFs
+        if output in ("markdown", "both"):
             try:
-                os.unlink(p)
-            except FileNotFoundError:
-                pass
+                md_list = [res.markdown for res in outputs]
+                if is_pdf and combine_pdf_pages:
+                    # Return a single markdown string
+                    md_text = app.state.pipeline.concatenate_markdown_pages(md_list)
+                    resp["markdown"] = md_text
+                else:
+                    # Return raw per-page markdown dicts (contain text and embedded image mappings)
+                    resp["markdown_pages"] = md_list
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to build Markdown output: {e}")
+
+        return JSONResponse(resp)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
