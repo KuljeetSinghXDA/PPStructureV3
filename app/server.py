@@ -58,43 +58,43 @@ MAX_PARALLEL_PREDICT = 1
 # ================= App & Lifespan =================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pipeline = PPStructureV3(
-        device=DEVICE,
-        enable_mkldnn=ENABLE_MKLDNN,
-        enable_hpi=ENABLE_HPI,
-        cpu_threads=CPU_THREADS,
-        layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
-        text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
-        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
-        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
-        formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
-        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-        layout_threshold=LAYOUT_THRESHOLD,
-        text_det_thresh=TEXT_DET_THRESH,
-        text_det_box_thresh=TEXT_DET_BOX_THRESH,
-        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
-        text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
-        text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-        use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-        use_table_recognition=USE_TABLE_RECOGNITION,
-        use_formula_recognition=USE_FORMULA_RECOGNITION,
-        use_chart_recognition=USE_CHART_RECOGNITION,
-    )
-    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
-    yield
+    app.state.pipeline = PPStructureV3(
+        device=DEVICE,
+        enable_mkldnn=ENABLE_MKLDNN,
+        enable_hpi=ENABLE_HPI,
+        cpu_threads=CPU_THREADS,
+        layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
+        text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
+        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
+        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
+        formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
+        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+        layout_threshold=LAYOUT_THRESHOLD,
+        text_det_thresh=TEXT_DET_THRESH,
+        text_det_box_thresh=TEXT_DET_BOX_THRESH,
+        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
+        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
+        text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
+        text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+        use_doc_unwarping=USE_DOC_UNWARPING,
+        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+        use_table_recognition=USE_TABLE_RECOGNITION,
+        use_formula_recognition=USE_FORMULA_RECOGNITION,
+        use_chart_recognition=USE_CHART_RECOGNITION,
+    )
+    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
+    yield
 
 app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
-
+    return {"status": "ok"}
+    
 @app.post("/parse")
 async def parse(
     file: UploadFile = File(...),
