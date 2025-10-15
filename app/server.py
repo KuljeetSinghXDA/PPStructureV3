@@ -1,10 +1,9 @@
 # fastapi_app.py
 import os
-import json
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, List, Optional, Literal
+from typing import Any, List, Optional, Tuple, Literal
 
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
@@ -39,7 +38,7 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters (tunable)
+# Detection/recognition parameters (high recall but CPU-friendly)
 LAYOUT_THRESHOLD = None
 TEXT_DET_THRESH = None
 TEXT_DET_BOX_THRESH = None
@@ -55,14 +54,16 @@ MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1  # tuned for CPU-only
 
 # PDF rasterization
-PDF_DPI_DEFAULT = 300
+PDF_DPI_DEFAULT = 300  # 300–400 DPI recommended for small text
 
-# ================= Lifespan =================
+# ================= FastAPI App and Lifespan =================
+app = FastAPI(title="PPStructureV3 OCR API", version="2.0.0")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import threading
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
-    # Initialize a single, long-lived pipeline
+    # Initialize a single, long-lived pipeline (recommended in docs/tech report)
     app.state.pipeline = PPStructureV3(
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
@@ -93,8 +94,7 @@ async def lifespan(app: FastAPI):
     )
     yield
 
-# Single app instance with lifespan
-app = FastAPI(title="PPStructureV3 OCR API", version="2.1.1", lifespan=lifespan)
+app.router.lifespan_context = lifespan
 
 @app.get("/health")
 def health():
@@ -154,11 +154,11 @@ def _rasterize_pdf_pymupdf(pdf_path: Path, out_dir: Path, dpi: int, page_indices
 # ================= /parse Endpoint =================
 @app.post("/parse")
 async def parse(
-    file: UploadFile = File(..., description="Supported: " + ", ".join(sorted(ALLOWED_EXTENSIONS)) ),
+    file: UploadFile = File(..., description="Supported: " + ", ".join(sorted(ALLOWED_EXTENSIONS))),
     output_format: Literal["json", "markdown"] = Query("json"),
     page_range: Optional[str] = Query(None, description="1-based ranges for PDFs, e.g., '1-3,5'"),
     dpi: int = Query(PDF_DPI_DEFAULT, ge=150, le=600, description="PDF rasterization DPI"),
-    use_chart_recognition: Optional[bool] = Query(None, description="Predict-time toggle for chart parsing"),
+    use_chart_recognition: Optional[bool] = Query(None, description="Predict-time toggle if supported"),
 ):
     ext = _validate_upload(file)
 
@@ -184,8 +184,10 @@ async def parse(
         # Prepare inputs for pipeline.predict
         inputs: List[str] = []
         if ext == ".pdf":
+            # High-DPI pre-render
             out_dir = Path(temp_dir) / "pages"
             out_dir.mkdir(parents=True, exist_ok=True)
+            # Resolve pages
             import fitz
             with fitz.open(src_path.as_posix()) as doc:
                 pages = _parse_page_range(page_range, doc.page_count)
@@ -208,52 +210,35 @@ async def parse(
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"OCR failed: {e}")
 
-        # Normalize to list
         if not isinstance(results, (list, tuple)):
             results = [results]
 
-        # Markdown response: canonical concatenation
+        # Format output
         if output_format == "markdown":
-            markdown_list: List[dict] = []
+            parts: List[str] = []
             for res in results:
-                md = getattr(res, "markdown", None)
-                if isinstance(md, dict):
-                    markdown_list.append(md)
+                if hasattr(res, "markdown"):
+                    md = res.markdown
+                    parts.append(md if isinstance(md, str) else str(md))
+                elif hasattr(res, "to_markdown"):
+                    parts.append(res.to_markdown())
                 else:
-                    text = str(getattr(res, "text", ""))
-                    markdown_list.append({"text": text, "markdown_images": {}})
+                    parts.append(str(getattr(res, "text", "")))
+            concatenated = "\n\n---\n\n".join(parts)
+            return PlainTextResponse(concatenated, media_type="text/markdown")
 
-            concatenated_md = ""
-            try:
-                concatenated_md = app.state.pipeline.concatenate_markdown_pages(markdown_list)
-            except AttributeError:
-                try:
-                    concatenated_md = app.state.pipeline.paddlex_pipeline.concatenate_markdown_pages(markdown_list)
-                except Exception:
-                    concatenated_md = "\n\n---\n\n".join([md.get("text", "") for md in markdown_list])
-
-            return PlainTextResponse(concatenated_md or "", media_type="text/markdown")
-
-        # JSON response: use save_to_json for compatibility across versions
-        tmp_json_dir = Path(temp_dir) / "json"
-        tmp_json_dir.mkdir(parents=True, exist_ok=True)
+        # Default: json
         pages_out: List[dict] = []
         for idx, res in enumerate(results, start=1):
-            before = set(tmp_json_dir.glob("*.json"))
-            try:
-                res.save_to_json(save_path=tmp_json_dir.as_posix())
-            except Exception:
-                pages_out.append({"index": idx, "data": {"result": str(getattr(res, "text", ""))}})
-                continue
-            after = set(tmp_json_dir.glob("*.json"))
-            new_files = sorted(list(after - before))
-            data = None
-            if new_files:
-                latest = new_files[-1]
-                data = json.loads(latest.read_text(encoding="utf-8"))
+            if hasattr(res, "to_dict"):
+                d = res.to_dict()
+            elif hasattr(res, "json"):
+                d = res.json
+            elif isinstance(res, dict):
+                d = res
             else:
-                data = {"result": str(getattr(res, "text", ""))}
-            pages_out.append({"index": idx, "data": data})
+                d = {"result": str(res)}
+            pages_out.append({"index": idx, "data": d})
 
         return JSONResponse({"filename": file.filename, "pages": pages_out})
 
