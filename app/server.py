@@ -112,7 +112,7 @@ async def parse(
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
 
-    # Stream to a unique temp directory
+    # Stream to a unique temp directory with size enforcement
     tmp_dir = tempfile.mkdtemp(prefix="ppsv3_")
     dst_path = Path(tmp_dir) / Path(file.filename).name
     max_bytes = int(MAX_FILE_SIZE_MB * 1024 * 1024)
@@ -134,9 +134,10 @@ async def parse(
         await file.close()
 
         # Guarded synchronous inference in the threadpool
-        sem = app.state.predict_sem
+        sem: threading.Semaphore = app.state.predict_sem
 
         async def _predict(path_str: str):
+            # Acquire/release in threadpool to avoid blocking the event loop
             await run_in_threadpool(sem.acquire)
             try:
                 return await run_in_threadpool(app.state.pipeline.predict, path_str)
@@ -144,6 +145,7 @@ async def parse(
                 sem.release()
 
         outputs = await _predict(str(dst_path))
+        outputs = list(outputs)  # ensure materialized list
 
         # Build response
         is_pdf = ext == ".pdf"
@@ -166,12 +168,58 @@ async def parse(
         if output in ("markdown", "both"):
             try:
                 md_list = [res.markdown for res in outputs]
+
+                def _concat_markdown_pages(markdown_list: List[dict]) -> str:
+                    # 1) Preferred: method on pipeline if available
+                    concat_fn = getattr(app.state.pipeline, "concatenate_markdown_pages", None)
+                    if callable(concat_fn):
+                        return concat_fn(markdown_list)
+                    # 2) Known fallback per PaddleOCR team guidance
+                    paddlex = getattr(app.state.pipeline, "paddlex_pipeline", None)
+                    if paddlex:
+                        concat_fn2 = getattr(paddlex, "concatenate_markdown_pages", None)
+                        if callable(concat_fn2):
+                            return concat_fn2(markdown_list)
+                    # 3) Safe local join respecting observed keys
+                    texts = []
+                    prev_end = True
+                    for page in markdown_list:
+                        # Handle both {text, images, isStart, isEnd} and {markdown_texts, markdown_images}
+                        text_val = page.get("text")
+                        start_flag = page.get("isStart")
+                        end_flag = page.get("isEnd")
+                        if text_val is None and "markdown_texts" in page:
+                            text_val = page.get("markdown_texts", "")
+                            # older schema may not have flags; treat as paragraph break
+                            start_flag = True if start_flag is None else start_flag
+                            end_flag = True if end_flag is None else end_flag
+                        if text_val is None:
+                            text_val = ""
+                        # If both pages are mid-paragraph and not Chinese boundary chars, add a space; else blank line
+                        if (start_flag is False) and (prev_end is False) and texts:
+                            if texts[-1] and text_val:
+                                last_char = texts[-1][-1]
+                                first_char = text_val[0]
+                                import re as _re
+                                last_cn = bool(_re.match(r"[\u4e00-\u9fff]", last_char))
+                                first_cn = bool(_re.match(r"[\u4e00-\u9fff]", first_char))
+                                if not (last_cn or first_cn):
+                                    texts[-1] = texts[-1] + " " + text_val
+                                else:
+                                    texts[-1] = texts[-1] + text_val
+                            else:
+                                texts.append(text_val)
+                        else:
+                            if texts:
+                                texts.append("")  # paragraph break
+                            texts.append(text_val)
+                        prev_end = True if end_flag is not False else False
+                    return "\n".join(texts).strip()
+
                 if is_pdf and combine_pdf_pages:
-                    # Return a single markdown string
-                    md_text = app.state.pipeline.concatenate_markdown_pages(md_list)
+                    md_text = _concat_markdown_pages(md_list)
                     resp["markdown"] = md_text
                 else:
-                    # Return raw per-page markdown dicts (contain text and embedded image mappings)
                     resp["markdown_pages"] = md_list
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to build Markdown output: {e}")
