@@ -20,7 +20,6 @@ CPU_THREADS = 4  # Increased for better CPU utilization
 USE_DOC_ORIENTATION_CLASSIFY = False
 USE_DOC_UNWARPING = False  
 USE_TEXTLINE_ORIENTATION = True  # Enabled for better textline orientation
-USE_CHART_PARSING = False  # New in v3.2.0 for chart-to-table conversion
 
 # Subpipeline toggles - optimized based on performance metrics
 USE_TABLE_RECOGNITION = True
