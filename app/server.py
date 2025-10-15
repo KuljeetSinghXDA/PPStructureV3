@@ -96,7 +96,6 @@ def health():
     return {"status": "ok"}
 
 @app.post("/parse")
-@app.post("/parse")
 async def parse(
     file: UploadFile = File(..., description="PDF or image to parse"),
     output: Literal["json", "markdown", "both"] = Query("json", description="Response content type"),
