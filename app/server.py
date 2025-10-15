@@ -1,25 +1,23 @@
-# fastapi_app.py
 import os
+import tempfile
+import threading
 import json
 import shutil
-import tempfile
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Literal
-
-import uvicorn
+from typing import List, Literal, Optional
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-from contextlib import asynccontextmanager
 
-# Models: PaddleOCR PP-StructureV3
+ENABLE_HPI = False
+ENABLE_MKLDNN = True
+
 from paddleocr import PPStructureV3
 
-# ================= Service Configuration =================
+# ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
 CPU_THREADS = 4
-ENABLE_MKLDNN = True
-ENABLE_HPI = False
 
 # Subpipeline toggles (explicit booleans)
 USE_DOC_ORIENTATION_CLASSIFY = False
@@ -29,7 +27,7 @@ USE_TABLE_RECOGNITION = True
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 
-# Model overrides (explicit names)
+# Model overrides
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
@@ -39,7 +37,7 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters (high recall but CPU-friendly)
+# Detection/recognition parameters
 LAYOUT_THRESHOLD = None
 TEXT_DET_THRESH = None
 TEXT_DET_BOX_THRESH = None
@@ -49,22 +47,15 @@ TEXT_DET_LIMIT_TYPE = None
 TEXT_REC_SCORE_THRESH = None
 TEXT_RECOGNITION_BATCH_SIZE = None
 
-# I/O and limits
+
+# I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
-MAX_PARALLEL_PREDICT = 1  # tuned for CPU-only
+MAX_PARALLEL_PREDICT = 1
 
-# PDF rasterization
-PDF_DPI_DEFAULT = 300  # 300–400 DPI recommended for small text
-
-# ================= FastAPI App and Lifespan =================
-app = FastAPI(title="PPStructureV3 OCR API", version="2.1.0")
-
+# ================= App & Lifespan =================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import threading
-    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
-    # Initialize a single, long-lived pipeline
     app.state.pipeline = PPStructureV3(
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
@@ -93,182 +84,103 @@ async def lifespan(app: FastAPI):
         use_formula_recognition=USE_FORMULA_RECOGNITION,
         use_chart_recognition=USE_CHART_RECOGNITION,
     )
+    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
     yield
 
-app = FastAPI(title="PPStructureV3 OCR API", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# ================= Helpers =================
-def _suffix(name: str) -> str:
-    return Path(name or "").suffix.lower()
-
-def _validate_upload(file: UploadFile) -> str:
-    if not file or not file.filename:
-        raise HTTPException(status_code=400, detail="Missing file")
-    ext = _suffix(file.filename)
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=415, detail=f"Unsupported file type: {ext}")
-    return ext
-
-def _parse_page_range(page_range_str: Optional[str], num_pages: int) -> List[int]:
-    if not page_range_str:
-        return list(range(num_pages))
-    selected = set()
-    for part in page_range_str.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            a, b = part.split("-", 1)
-            start = int(a) if a else 1
-            end = int(b) if b else num_pages
-            if start > end:
-                raise HTTPException(status_code=400, detail="Invalid page range: start > end")
-            selected.update(range(start - 1, end))
-        else:
-            selected.add(int(part) - 1)
-    return sorted([i for i in selected if 0 <= i < num_pages])
-
-def _rasterize_pdf_pymupdf(pdf_path: Path, out_dir: Path, dpi: int, page_indices: Optional[List[int]] = None) -> List[Path]:
-    import fitz
-    doc = fitz.open(pdf_path.as_posix())
-    try:
-        n = doc.page_count
-        if page_indices is None:
-            page_indices = list(range(n))
-        scale = dpi / 72.0
-        mat = fitz.Matrix(scale, scale)
-        img_paths: List[Path] = []
-        for idx in page_indices:
-            page = doc.load_page(idx)
-            pix = page.get_pixmap(matrix=mat)
-            out_path = out_dir / f"page_{idx+1:04d}.png"
-            pix.save(out_path.as_posix())
-            img_paths.append(out_path)
-        return img_paths
-    finally:
-        doc.close()
-
-# ================= /parse Endpoint =================
 @app.post("/parse")
 async def parse(
-    file: UploadFile = File(..., description="Supported: " + ", ".join(sorted(ALLOWED_EXTENSIONS)) ),
-    output_format: Literal["json", "markdown"] = Query("json"),
-    page_range: Optional[str] = Query(None, description="1-based ranges for PDFs, e.g., '1-3,5'"),
-    dpi: int = Query(PDF_DPI_DEFAULT, ge=150, le=600, description="PDF rasterization DPI"),
-    use_chart_recognition: Optional[bool] = Query(None, description="Predict-time toggle for chart parsing"),
+    file: UploadFile = File(..., description="PDF or image to parse"),
+    output: Literal["json", "markdown", "both"] = Query("json", description="Response content type"),
+    combine_pdf_pages: bool = Query(
+        True,
+        description="If input is PDF and output includes markdown, combine pages into one Markdown string",
+    ),
 ):
-    ext = _validate_upload(file)
+    # Validate filename and extension
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
 
-    # Persist upload in a temp directory via streaming
-    temp_dir = tempfile.mkdtemp(prefix="ppsv3_")
+    # Stream to a unique temp directory
+    tmp_dir = tempfile.mkdtemp(prefix="ppsv3_")
+    dst_path = Path(tmp_dir) / Path(file.filename).name
+    max_bytes = int(MAX_FILE_SIZE_MB * 1024 * 1024)
+
+    total = 0
     try:
-        src_path = Path(temp_dir) / ("upload" + ext)
-        size = 0
-        with open(src_path, "wb") as out:
+        with open(dst_path, "wb") as out:
             while True:
-                chunk = await file.read(1 << 20)  # 1 MB
+                chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
-                size += len(chunk)
-                if size > MAX_FILE_SIZE_MB * 1024 * 1024:
-                    raise HTTPException(status_code=413, detail=f"File too large (>{MAX_FILE_SIZE_MB}MB)")
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large (> {MAX_FILE_SIZE_MB} MB)",
+                    )
                 out.write(chunk)
-            out.flush()
-            os.fsync(out.fileno())
-        if size == 0:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        await file.close()
 
-        # Prepare inputs for pipeline.predict
-        inputs: List[str] = []
-        if ext == ".pdf":
-            # High-DPI pre-render
-            out_dir = Path(temp_dir) / "pages"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            import fitz
-            with fitz.open(src_path.as_posix()) as doc:
-                pages = _parse_page_range(page_range, doc.page_count)
-            img_paths = _rasterize_pdf_pymupdf(src_path, out_dir, dpi=dpi, page_indices=pages)
-            if not img_paths:
-                return JSONResponse({"filename": file.filename, "message": "No pages selected"}, status_code=200)
-            inputs = [p.as_posix() for p in img_paths]
-        else:
-            inputs = [src_path.as_posix()]
+        # Guarded synchronous inference in the threadpool
+        sem = app.state.predict_sem
 
-        # Predict-time kwargs (only documented/supported flags)
-        predict_kwargs = {}
-        if use_chart_recognition is not None:
-            predict_kwargs["use_chart_recognition"] = use_chart_recognition
-
-        # Call OCR under concurrency guard
-        with app.state.predict_sem:
+        async def _predict(path_str: str):
+            await run_in_threadpool(sem.acquire)
             try:
-                # Documented Python API supports keyword 'input' for predict
-                results = await run_in_threadpool(app.state.pipeline.predict, input=inputs, **predict_kwargs)
+                return await run_in_threadpool(app.state.pipeline.predict, path_str)
+            finally:
+                sem.release()
+
+        outputs = await _predict(str(dst_path))
+
+        # Build response
+        is_pdf = ext == ".pdf"
+        resp = {
+            "filename": Path(file.filename).name,
+            "extension": ext,
+            "size_bytes": total,
+            "output": output,
+        }
+
+        # JSON payload from result objects (dicts)
+        if output in ("json", "both"):
+            try:
+                pages_json = [res.json for res in outputs]
             except Exception as e:
-                raise HTTPException(status_code=500, detail=f"OCR failed: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to build JSON output: {e}")
+            resp["pages_json"] = pages_json
 
-        # Normalize to list
-        if not isinstance(results, (list, tuple)):
-            results = [results]
-
-        # Markdown response: canonical concatenation
-        if output_format == "markdown":
-            markdown_list: List[dict] = []
-            for res in results:
-                md = getattr(res, "markdown", None)
-                if isinstance(md, dict):
-                    markdown_list.append(md)
+        # Markdown payloads: either list of per-page dicts or single concatenated string for PDFs
+        if output in ("markdown", "both"):
+            try:
+                md_list = [res.markdown for res in outputs]
+                if is_pdf and combine_pdf_pages:
+                    # Return a single markdown string
+                    md_text = app.state.pipeline.concatenate_markdown_pages(md_list)
+                    resp["markdown"] = md_text
                 else:
-                    # Fallback for unexpected objects: wrap text into markdown dict
-                    text = str(getattr(res, "text", ""))
-                    markdown_list.append({"text": text, "markdown_images": {}})
+                    # Return raw per-page markdown dicts (contain text and embedded image mappings)
+                    resp["markdown_pages"] = md_list
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to build Markdown output: {e}")
 
-            concatenated_md = ""
-            try:
-                # Preferred API (newer versions)
-                concatenated_md = app.state.pipeline.concatenate_markdown_pages(markdown_list)
-            except AttributeError:
-                # Compatibility path (some builds expose it under paddlex_pipeline)
-                try:
-                    concatenated_md = app.state.pipeline.paddlex_pipeline.concatenate_markdown_pages(markdown_list)
-                except Exception:
-                    # Final fallback: simple join of page texts
-                    concatenated_md = "\n\n---\n\n".join([md.get("text", "") for md in markdown_list])
+        return JSONResponse(resp)
 
-            return PlainTextResponse(concatenated_md or "", media_type="text/markdown")
-
-        # JSON response: use save_to_json for compatibility across versions
-        tmp_json_dir = Path(temp_dir) / "json"
-        tmp_json_dir.mkdir(parents=True, exist_ok=True)
-        pages_out: List[dict] = []
-        for idx, res in enumerate(results, start=1):
-            before = set(tmp_json_dir.glob("*.json"))
-            # Documented, stable write API
-            try:
-                res.save_to_json(save_path=tmp_json_dir.as_posix())
-            except Exception:
-                # Last resort for unexpected object types
-                pages_out.append({"index": idx, "data": {"result": str(getattr(res, "text", ""))}})
-                continue
-            after = set(tmp_json_dir.glob("*.json"))
-            new_files = sorted(list(after - before))
-            data = None
-            if new_files:
-                latest = new_files[-1]
-                data = json.loads(latest.read_text(encoding="utf-8"))
-            else:
-                data = {"result": str(getattr(res, "text", ""))}
-            pages_out.append({"index": idx, "data": data})
-
-        return JSONResponse({"filename": file.filename, "pages": pages_out})
-
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-if __name__ == "__main__":
-    # Optional: run with `uvicorn fastapi_app:app --host 0.0.0.0 --port 8000`
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
