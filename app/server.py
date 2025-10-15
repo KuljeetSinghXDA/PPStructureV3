@@ -19,17 +19,19 @@ from paddleocr import PPStructureV3
 DEVICE = "cpu"
 CPU_THREADS = 4
 
-# Subpipeline toggles (explicit booleans)
+# Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = False
 USE_DOC_UNWARPING = False
 USE_TEXTLINE_ORIENTATION = False
+
+# Subpipeline toggles
 USE_TABLE_RECOGNITION = True
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 
 # Model overrides
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_server_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
@@ -92,6 +94,7 @@ app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifesp
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.post("/parse")
 async def parse(
