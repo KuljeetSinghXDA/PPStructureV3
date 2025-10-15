@@ -1,5 +1,3 @@
-go a deep research, take your time and plan /parse endpoint script which should be pinnacle for ppstructurev3. Then generate script /parse endpoint, do not touch  or provide suggestions for other code other than /parse endpoint. 
-
 import os
 import tempfile
 import threading
@@ -22,14 +20,14 @@ DEVICE = "cpu"
 CPU_THREADS = 4
 
 # Optional accuracy boosters
-USE_DOC_ORIENTATION_CLASSIFY = None
-USE_DOC_UNWARPING = None
-USE_TEXTLINE_ORIENTATION = None
+USE_DOC_ORIENTATION_CLASSIFY = False
+USE_DOC_UNWARPING = False
+USE_TEXTLINE_ORIENTATION = False
 
 # Subpipeline toggles
-USE_TABLE_RECOGNITION = None
-USE_FORMULA_RECOGNITION = None
-USE_CHART_RECOGNITION = None
+USE_TABLE_RECOGNITION = True
+USE_FORMULA_RECOGNITION = False
+USE_CHART_RECOGNITION = False
 
 # Model overrides
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
