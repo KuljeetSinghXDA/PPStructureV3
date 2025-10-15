@@ -33,7 +33,7 @@ USE_SEAL_RECOGNITION = False
 USE_REGION_DETECTION = True
 
 # Models
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
@@ -47,7 +47,7 @@ SEAL_TEXT_DETECTION_MODEL_NAME = None
 SEAL_TEXT_RECOGNITION_MODEL_NAME = None
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Optional model dirs (set to None by default)
+# Optional model dirs
 LAYOUT_DETECTION_MODEL_DIR = None
 REGION_DETECTION_MODEL_DIR = None
 TEXT_DETECTION_MODEL_DIR = None
@@ -66,7 +66,7 @@ SEAL_TEXT_DETECTION_MODEL_DIR = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
 CHART_RECOGNITION_MODEL_DIR = None
 
-# Thresholds / sizes / batches (all None by default)
+# Thresholds / sizes / batches
 LAYOUT_THRESHOLD = None
 LAYOUT_NMS = None
 LAYOUT_UNCLIP_RATIO = None
@@ -93,7 +93,7 @@ CHART_RECOGNITION_BATCH_SIZE = None
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 
 # Backend knobs (ARM64-friendly)
-ENABLE_HPI = False  # HPI is x86_64-focused; keep off on ARM64
+ENABLE_HPI = False  # HPI not supported on ARM64 currently
 _ENABLE_MKLDNN_DEFAULT = platform.machine().lower() in ("x86_64", "amd64")
 ENABLE_MKLDNN = bool(int(os.getenv("ENABLE_MKLDNN", "1" if _ENABLE_MKLDNN_DEFAULT else "0")))
 USE_TENSORRT = False
@@ -136,7 +136,6 @@ def _open_image_any(val: Union[Image.Image, bytes, str]) -> Optional[Image.Image
     return None
 
 def _embed_images_in_markdown(md_text: str, images_map: Dict[str, Union[Image.Image, bytes, str]]) -> str:
-    """Replace image references with base64 data URIs for self-contained markdown."""
     for path, val in images_map.items():
         pil_img = _open_image_any(val)
         if pil_img is None:
@@ -145,24 +144,32 @@ def _embed_images_in_markdown(md_text: str, images_map: Dict[str, Union[Image.Im
         pil_img.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         data_uri = f"data:image/png;base64,{b64}"
-        # Replace both HTML img src and Markdown image syntax
         md_text = md_text.replace(f'src="{path}"', f'src="{data_uri}"')
         md_text = md_text.replace(f"({path})", f"({data_uri})")
     return md_text
 
+def _page_json_with_fallback(res) -> Dict[str, Any]:
+    j = getattr(res, "json", None)
+    if isinstance(j, dict):
+        return j
+    # Fallback for nightlies: persist and read the last JSON
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            res.save_to_json(save_path=td)
+            files = sorted(Path(td).glob("*.json"))
+            if files:
+                return json.loads(files[-1].read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
 def _collect_results(pipeline: PPStructureV3, outputs, inline_images: bool):
-    """
-    Collect JSON and Markdown results following official PP-StructureV3 pattern:
-    - Use res.json for per-page dict
-    - Pass full per-page markdown dicts to concatenate_markdown_pages
-    - Optionally inline images from 'markdown_images' as base64
-    """
     page_json: List[Dict[str, Any]] = []
     markdown_list: List[Dict[str, Any]] = []
     markdown_images_list: List[Dict[str, Union[Image.Image, bytes, str]]] = []
 
     for res in outputs:
-        page_json.append(getattr(res, "json", {}))
+        page_json.append(_page_json_with_fallback(res))
         md_dict = getattr(res, "markdown", None)
         if md_dict and isinstance(md_dict, dict):
             markdown_list.append(md_dict)
@@ -199,7 +206,6 @@ def _collect_results(pipeline: PPStructureV3, outputs, inline_images: bool):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pipeline = _make_pipeline(
-        # Backend
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
@@ -208,8 +214,6 @@ async def lifespan(app: FastAPI):
         mkldnn_cache_capacity=MKLDNN_CACHE_CAPACITY,
         cpu_threads=CPU_THREADS,
         paddlex_config=PADDLEX_CONFIG,
-
-        # Models and dirs
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         layout_detection_model_dir=LAYOUT_DETECTION_MODEL_DIR,
         region_detection_model_dir=REGION_DETECTION_MODEL_DIR,
@@ -240,28 +244,20 @@ async def lifespan(app: FastAPI):
         seal_text_recognition_model_dir=SEAL_TEXT_RECOGNITION_MODEL_DIR,
         chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
         chart_recognition_model_dir=CHART_RECOGNITION_MODEL_DIR,
-
-        # Layout params
         layout_threshold=LAYOUT_THRESHOLD,
         layout_nms=LAYOUT_NMS,
         layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
         layout_merge_bboxes_mode=LAYOUT_MERGE_BBOXES_MODE,
-
-        # Text det params
         text_det_thresh=TEXT_DET_THRESH,
         text_det_box_thresh=TEXT_DET_BOX_THRESH,
         text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
         text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
         text_det_limit_type=TEXT_DET_LIMIT_TYPE,
-
-        # Seal det params
         seal_det_limit_side_len=SEAL_DET_LIMIT_SIDE_LEN,
         seal_det_limit_type=SEAL_DET_LIMIT_TYPE,
         seal_det_thresh=SEAL_DET_THRESH,
         seal_det_box_thresh=SEAL_DET_BOX_THRESH,
         seal_det_unclip_ratio=SEAL_DET_UNCLIP_RATIO,
-
-        # Rec/Batch params
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
         textline_orientation_batch_size=TEXTLINE_ORIENTATION_BATCH_SIZE,
@@ -269,8 +265,6 @@ async def lifespan(app: FastAPI):
         chart_recognition_batch_size=CHART_RECOGNITION_BATCH_SIZE,
         seal_text_recognition_batch_size=SEAL_TEXT_RECOGNITION_BATCH_SIZE,
         seal_rec_score_thresh=SEAL_REC_SCORE_THRESH,
-
-        # Toggles
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
@@ -284,7 +278,7 @@ async def lifespan(app: FastAPI):
     app.state.pipeline_cache = OrderedDict()
     yield
 
-app = FastAPI(title="PPStructureV3 /parse API", version="1.8.0", lifespan=lifespan)
+app = FastAPI(title="PPStructureV3 /parse API", version="1.9.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
@@ -445,7 +439,7 @@ async def parse(
     seal_det_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
     seal_det_box_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
     seal_det_unclip_ratio: Optional[float] = Query(None, gt=0.0),
-    # Predict-time table behavior only
+    # Predict-time table behavior
     use_ocr_results_with_table_cells: Optional[bool] = Query(None),
     use_e2e_wired_table_rec_model: Optional[bool] = Query(None),
     use_e2e_wireless_table_rec_model: Optional[bool] = Query(None),
@@ -453,47 +447,32 @@ async def parse(
     use_wireless_table_cells_trans_to_html: Optional[bool] = Query(None),
     use_table_orientation_classify: Optional[bool] = Query(None),
 ):
-    # Validate upload
     if _file_too_big(file):
         raise HTTPException(status_code=400, detail=f"File too large (> {MAX_FILE_SIZE_MB} MB)")
     if not _ext_ok(file.filename):
         raise HTTPException(status_code=400, detail=f"Unsupported file type; allowed: {sorted(ALLOWED_EXTENSIONS)}")
 
-    # Save to disk
     tmp_dir = tempfile.mkdtemp(prefix="ppsv3_")
     tmp_path = os.path.join(tmp_dir, file.filename)
     try:
         with open(tmp_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
-        # Build constructor overrides (only official init args)
+        # Build constructor overrides (only documented init args)
         effective: Dict[str, Any] = {}
         for k, v in dict(
-            device=device,
-            enable_mkldnn=enable_mkldnn,
-            enable_hpi=enable_hpi,
-            use_tensorrt=use_tensorrt,
-            precision=precision,
-            mkldnn_cache_capacity=mkldnn_cache_capacity,
-            cpu_threads=cpu_threads,
-            paddlex_config=paddlex_config,
-            use_doc_orientation_classify=use_doc_orientation_classify,
-            use_doc_unwarping=use_doc_unwarping,
-            use_textline_orientation=use_textline_orientation,
-            use_table_recognition=use_table_recognition,
-            use_formula_recognition=use_formula_recognition,
-            use_chart_recognition=use_chart_recognition,
-            use_seal_recognition=use_seal_recognition,
-            use_region_detection=use_region_detection,
-            layout_detection_model_name=layout_detection_model_name,
-            layout_detection_model_dir=layout_detection_model_dir,
+            device=device, enable_mkldnn=enable_mkldnn, enable_hpi=enable_hpi,
+            use_tensorrt=use_tensorrt, precision=precision, mkldnn_cache_capacity=mkldnn_cache_capacity,
+            cpu_threads=cpu_threads, paddlex_config=paddlex_config,
+            use_doc_orientation_classify=use_doc_orientation_classify, use_doc_unwarping=use_doc_unwarping,
+            use_textline_orientation=use_textline_orientation, use_table_recognition=use_table_recognition,
+            use_formula_recognition=use_formula_recognition, use_chart_recognition=use_chart_recognition,
+            use_seal_recognition=use_seal_recognition, use_region_detection=use_region_detection,
+            layout_detection_model_name=layout_detection_model_name, layout_detection_model_dir=layout_detection_model_dir,
             region_detection_model_dir=region_detection_model_dir,
-            text_detection_model_name=text_detection_model_name,
-            text_detection_model_dir=text_detection_model_dir,
-            text_recognition_model_name=text_recognition_model_name,
-            text_recognition_model_dir=text_recognition_model_dir,
-            table_classification_model_name=table_classification_model_name,
-            table_classification_model_dir=table_classification_model_dir,
+            text_detection_model_name=text_detection_model_name, text_detection_model_dir=text_detection_model_dir,
+            text_recognition_model_name=text_recognition_model_name, text_recognition_model_dir=text_recognition_model_dir,
+            table_classification_model_name=table_classification_model_name, table_classification_model_dir=table_classification_model_dir,
             wired_table_structure_recognition_model_name=wired_table_structure_recognition_model_name,
             wired_table_structure_recognition_model_dir=wired_table_structure_recognition_model_dir,
             wireless_table_structure_recognition_model_name=wireless_table_structure_recognition_model_name,
@@ -504,48 +483,31 @@ async def parse(
             wireless_table_cells_detection_model_dir=wireless_table_cells_detection_model_dir,
             table_orientation_classify_model_name=table_orientation_classify_model_name,
             table_orientation_classify_model_dir=table_orientation_classify_model_dir,
-            formula_recognition_model_name=formula_recognition_model_name,
-            formula_recognition_model_dir=formula_recognition_model_dir,
-            chart_recognition_model_name=chart_recognition_model_name,
-            chart_recognition_model_dir=chart_recognition_model_dir,
+            formula_recognition_model_name=formula_recognition_model_name, formula_recognition_model_dir=formula_recognition_model_dir,
+            chart_recognition_model_name=chart_recognition_model_name, chart_recognition_model_dir=chart_recognition_model_dir,
             doc_orientation_classify_model_name=doc_orientation_classify_model_name,
             doc_orientation_classify_model_dir=doc_orientation_classify_model_dir,
-            doc_unwarping_model_name=doc_unwarping_model_name,
-            doc_unwarping_model_dir=doc_unwarping_model_dir,
+            doc_unwarping_model_name=doc_unwarping_model_name, doc_unwarping_model_dir=doc_unwarping_model_dir,
             textline_orientation_model_name=textline_orientation_model_name,
             textline_orientation_model_dir=textline_orientation_model_dir,
-            seal_text_detection_model_name=seal_text_detection_model_name,
-            seal_text_detection_model_dir=seal_text_detection_model_dir,
-            seal_text_recognition_model_name=seal_text_recognition_model_name,
-            seal_text_recognition_model_dir=seal_text_recognition_model_dir,
-            layout_threshold=layout_threshold,
-            layout_nms=layout_nms,
-            layout_unclip_ratio=layout_unclip_ratio,
+            seal_text_detection_model_name=seal_text_detection_model_name, seal_text_detection_model_dir=seal_text_detection_model_dir,
+            seal_text_recognition_model_name=seal_text_recognition_model_name, seal_text_recognition_model_dir=seal_text_recognition_model_dir,
+            layout_threshold=layout_threshold, layout_nms=layout_nms, layout_unclip_ratio=layout_unclip_ratio,
             layout_merge_bboxes_mode=layout_merge_bboxes_mode,
-            text_det_limit_side_len=text_det_limit_side_len,
-            text_det_limit_type=text_det_limit_type,
-            text_det_thresh=text_det_thresh,
-            text_det_box_thresh=text_det_box_thresh,
-            text_det_unclip_ratio=text_det_unclip_ratio,
-            text_rec_score_thresh=text_rec_score_thresh,
-            text_recognition_batch_size=text_recognition_batch_size,
+            text_det_limit_side_len=text_det_limit_side_len, text_det_limit_type=text_det_limit_type,
+            text_det_thresh=text_det_thresh, text_det_box_thresh=text_det_box_thresh, text_det_unclip_ratio=text_det_unclip_ratio,
+            text_rec_score_thresh=text_rec_score_thresh, text_recognition_batch_size=text_recognition_batch_size,
             textline_orientation_batch_size=textline_orientation_batch_size,
-            formula_recognition_batch_size=formula_recognition_batch_size,
-            chart_recognition_batch_size=chart_recognition_batch_size,
-            seal_text_recognition_batch_size=seal_text_recognition_batch_size,
-            seal_rec_score_thresh=seal_rec_score_thresh,
-            seal_det_limit_side_len=seal_det_limit_side_len,
-            seal_det_limit_type=seal_det_limit_type,
-            seal_det_thresh=seal_det_thresh,
-            seal_det_box_thresh=seal_det_box_thresh,
-            seal_det_unclip_ratio=seal_det_unclip_ratio,
+            formula_recognition_batch_size=formula_recognition_batch_size, chart_recognition_batch_size=chart_recognition_batch_size,
+            seal_text_recognition_batch_size=seal_text_recognition_batch_size, seal_rec_score_thresh=seal_rec_score_thresh,
+            seal_det_limit_side_len=seal_det_limit_side_len, seal_det_limit_type=seal_det_limit_type,
+            seal_det_thresh=seal_det_thresh, seal_det_box_thresh=seal_det_box_thresh, seal_det_unclip_ratio=seal_det_unclip_ratio,
         ).items():
             if v is not None:
                 effective[k] = v
 
         pipeline = _get_or_create_pipeline(app, effective)
 
-        # Predict-time table flags only
         predict_kwargs = _predict_table_kwargs(
             use_ocr_results_with_table_cells,
             use_e2e_wired_table_rec_model,
@@ -555,7 +517,6 @@ async def parse(
             use_table_orientation_classify,
         )
 
-        # Concurrency guard and inference
         acquired = app.state.predict_sem.acquire(timeout=600)
         if not acquired:
             raise HTTPException(status_code=503, detail="Server busy")
