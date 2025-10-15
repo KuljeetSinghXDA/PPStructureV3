@@ -10,26 +10,24 @@ from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
+# ================= Configuration (Pinned for v3.2.0) =================
+# Core Settings
 ENABLE_HPI = False
 ENABLE_MKLDNN = True
-
-from paddleocr import PPStructureV3
-
-# ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
 CPU_THREADS = 4
 
-# Optional accuracy boosters
+# Accuracy Boosters (Disabled for speed)
 USE_DOC_ORIENTATION_CLASSIFY = False
 USE_DOC_UNWARPING = False
 USE_TEXTLINE_ORIENTATION = False
 
-# Subpipeline toggles
+# Subpipeline Toggles
 USE_TABLE_RECOGNITION = True
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 
-# Model overrides
+# Model Overrides (Using latest v3.2.0 models)
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
@@ -39,7 +37,7 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters
+# Detection/Recognition Parameters (Using defaults by passing None)
 LAYOUT_THRESHOLD = None
 TEXT_DET_THRESH = None
 TEXT_DET_BOX_THRESH = None
@@ -49,15 +47,19 @@ TEXT_DET_LIMIT_TYPE = None
 TEXT_REC_SCORE_THRESH = None
 TEXT_RECOGNITION_BATCH_SIZE = None
 
-
-# I/O and service limits
+# I/O and Service Limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
 
-# ================= App & Lifespan =================
+
+# ================= App & Lifespan Management =================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Lifespan context manager to initialize and clean up the PPStructureV3 pipeline.
+    """
+    # Initialize the PPStructureV3 pipeline with the configured parameters.
     app.state.pipeline = PPStructureV3(
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
@@ -86,115 +88,125 @@ async def lifespan(app: FastAPI):
         use_formula_recognition=USE_FORMULA_RECOGNITION,
         use_chart_recognition=USE_CHART_RECOGNITION,
     )
+    # Semaphore to control concurrent predictions, as the pipeline is not thread-safe.
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
     yield
-    # Cleanup is handled by Python's garbage collector
+    # Cleanup: The pipeline object is automatically garbage collected.
 
-app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
+
+# Import must be after configuration for correct initialization.
+from paddleocr import PPStructureV3
+
+app = FastAPI(
+    title="PPStructureV3 /parse API",
+    description="An API endpoint for parsing document images and PDFs into structured Markdown and JSON using PaddleOCR's PP-StructureV3.",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+
+@app.get("/health", response_class=JSONResponse)
+def health():
+    """Health check endpoint."""
+    return {"status": "ok"}
+
 
 def _is_allowed_file(filename: str) -> bool:
     """Check if the file extension is allowed."""
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
-async def _parse_document(
-    pipeline,
-    file_path: str,
-    output_format: Literal["json", "markdown"]
+
+async def _process_file_in_thread(
+    pipeline, temp_file_path: str, output_format: Literal["markdown", "json"]
 ) -> str:
     """
-    Parse a document using the PPStructureV3 pipeline.
-    
-    Args:
-        pipeline: The initialized PPStructureV3 pipeline.
-        file_path: Path to the input file.
-        output_format: The desired output format ('json' or 'markdown').
-    
-    Returns:
-        The parsed document as a string in the specified format.
+    Runs the PPStructureV3 prediction in a separate thread and returns the result as a string.
     """
-    try:
-        # Run the prediction
-        results = await run_in_threadpool(pipeline.predict, file_path)
-        
-        if not results:
-            raise HTTPException(status_code=400, detail="No content could be parsed from the document.")
-        
-        # For now, we handle the first result. PPStructureV3 can return multiple results for multi-page PDFs.
-        # A more robust implementation would aggregate all pages.
-        result = results[0]
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = os.path.join(temp_dir, "output")
-            
-            if output_format == "json":
-                result.save_to_json(save_path=temp_path)
-                output_file = temp_path + ".json"
-            else:  # markdown
-                result.save_to_markdown(save_path=temp_path)
-                output_file = temp_path + ".md"
-            
-            with open(output_file, 'r', encoding='utf-8') as f:
-                return f.read()
-                
-    except Exception as e:
-        # It's important to catch and re-raise as HTTPException for proper error handling in FastAPI
-        raise HTTPException(status_code=500, detail=f"Document parsing failed: {str(e)}")
+    def _run_pipeline():
+        results = pipeline.predict(input=temp_file_path)
 
-@app.post("/parse")
-async def parse_endpoint(
-    file: UploadFile = File(...),
-    output_format: Literal["json", "markdown"] = Query("markdown", description="Output format for the parsed document.")
+        # PPStructureV3 returns a list of result objects.
+        # For a single file, we typically get one result object.
+        if not results:
+            raise HTTPException(status_code=500, detail="Pipeline returned no results.")
+
+        result_obj = results[0]
+
+        # Use a temporary directory to save the output file from the pipeline's method.
+        with tempfile.TemporaryDirectory() as temp_output_dir:
+            output_path = Path(temp_output_dir) / "output"
+            if output_format == "markdown":
+                result_obj.save_to_markdown(save_path=str(output_path))
+                output_file = output_path.with_suffix('.md')
+            else: # json
+                result_obj.save_to_json(save_path=str(output_path))
+                output_file = output_path.with_suffix('.json')
+
+            if not output_file.exists():
+                raise HTTPException(status_code=500, detail=f"Failed to generate {output_format} output.")
+
+            return output_file.read_text(encoding='utf-8')
+
+    return await run_in_threadpool(_run_pipeline)
+
+
+@app.post("/parse", response_class=PlainTextResponse)
+async def parse_document(
+    file: UploadFile = File(..., description="The document file to parse. Supports PDF, JPG, JPEG, PNG, BMP."),
+    output_format: Literal["markdown", "json"] = Query(
+        default="markdown",
+        description="The desired output format."
+    )
 ):
     """
-    Parse a document (PDF or image) and return its structured content.
-    
-    - **file**: The document to parse. Must be a PDF, JPG, JPEG, PNG, or BMP.
-    - **output_format**: The format for the response. Can be 'json' or 'markdown'.
+    Parses an uploaded document (PDF or image) and returns its structured content.
+
+    This endpoint uses PaddleOCR's PP-StructureV3 pipeline to perform layout analysis,
+    OCR, and table recognition, converting the input into either Markdown or JSON.
     """
-    # --- Input Validation ---
+    # --- 1. Validate the uploaded file ---
     if not _is_allowed_file(file.filename):
         raise HTTPException(
             status_code=400,
             detail=f"Invalid file type. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"
         )
-    
+
     file_size = await file.read()
     if len(file_size) > MAX_FILE_SIZE_MB * 1024 * 1024:
         raise HTTPException(
             status_code=400,
             detail=f"File size exceeds {MAX_FILE_SIZE_MB} MB limit."
         )
-    
-    # --- File Handling ---
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as temp_file:
+
+    # --- 2. Save the file to a temporary location ---
+    file_extension = Path(file.filename).suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
         temp_file.write(file_size)
         temp_file_path = temp_file.name
 
+    # Ensure cleanup of the temporary file
     try:
-        # --- Prediction with Concurrency Control ---
-        with app.state.predict_sem:
-            parsed_content = await _parse_document(
-                pipeline=app.state.pipeline,
-                file_path=temp_file_path,
-                output_format=output_format
-            )
-        
-        # --- Prepare Response ---
-        if output_format == "json":
-            try:
-                json_content = json.loads(parsed_content)
-                return JSONResponse(content=json_content)
-            except json.JSONDecodeError:
-                # Fallback in case the JSON is malformed, return as plain text
-                return PlainTextResponse(content=parsed_content, media_type="application/json")
-        else:
-            return PlainTextResponse(content=parsed_content, media_type="text/markdown")
-            
+        # --- 3. Acquire semaphore and run prediction ---
+        pipeline = app.state.pipeline
+        predict_sem = app.state.predict_sem
+
+        if not predict_sem.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="Server is busy. Please try again later.")
+
+        try:
+            result_content = await _process_file_in_thread(pipeline, temp_file_path, output_format)
+        finally:
+            predict_sem.release()
+
+        return PlainTextResponse(content=result_content, media_type="text/plain")
+
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        # Log the error `e` in a real application
+        raise HTTPException(status_code=500, detail=f"Internal server error during processing: {str(e)}")
     finally:
-        # Ensure the temporary file is always cleaned up
+        # Clean up the temporary file
         if os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
