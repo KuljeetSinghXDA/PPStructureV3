@@ -1,20 +1,29 @@
+# requirements (runtime):
+#   - fastapi
+#   - uvicorn
+#   - paddleocr >= 3.0.0
+#   - paddlepaddle (cpu or gpu build)
+# Notes:
+#   - PPStructureV3 APIs: predict(), res.save_to_json(), res.save_to_markdown(), res.markdown, concatenate_markdown_pages()
+#   - SLANet_plus end-to-end switches are passed at predict time when table recognition is enabled.
+
 import os
+import io
+import json
+import time
+import shutil
+import zipfile
 import tempfile
 import threading
-import json
-import shutil
-import base64
 from pathlib import Path
-from typing import List, Literal, Optional, Dict, Any
+from typing import Optional, List
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
 
-ENABLE_HPI = False
-ENABLE_MKLDNN = True
-
+# PaddleOCR 3.x PP-StructureV3
 from paddleocr import PPStructureV3
 
 # ================= Core Configuration (Pinned Values) =================
@@ -41,49 +50,160 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters
-LAYOUT_THRESHOLD = None
-TEXT_DET_THRESH = None
-TEXT_DET_BOX_THRESH = None
-TEXT_DET_UNCLIP_RATIO = None
-TEXT_DET_LIMIT_SIDE_LEN = None
-TEXT_DET_LIMIT_TYPE = None
-TEXT_REC_SCORE_THRESH = None
-TEXT_RECOGNITION_BATCH_SIZE = None
+# Detection/recognition parameters (None uses pipeline defaults)
+LAYOUT_THRESHOLD: Optional[float] = None
+TEXT_DET_THRESH: Optional[float] = None
+TEXT_DET_BOX_THRESH: Optional[float] = None
+TEXT_DET_UNCLIP_RATIO: Optional[float] = None
+TEXT_DET_LIMIT_SIDE_LEN: Optional[int] = None
+TEXT_DET_LIMIT_TYPE: Optional[str] = None
+TEXT_REC_SCORE_THRESH: Optional[float] = None
+TEXT_RECOGNITION_BATCH_SIZE: Optional[int] = None
+
+# Inference backend flags
+ENABLE_HPI = False
+ENABLE_MKLDNN = True
 
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
 
-# ================= Response Models =================
-class MarkdownOutput(BaseModel):
-    text: str
-    images: Dict[str, str]  # path -> base64 encoded image
-    isStart: bool
-    isEnd: bool
+# Output base
+OUTPUT_BASE_DIR = Path("outputs")  # persistent outputs per request
+OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-class PageResult(BaseModel):
-    page_index: Optional[int]
-    json_result: Dict[str, Any]
-    markdown: MarkdownOutput
+def _validate_file(tmp_path: Path):
+    ext = tmp_path.suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
+    size_mb = tmp_path.stat().st_size / (1024 * 1024)
+    if size_mb > MAX_FILE_SIZE_MB:
+        raise HTTPException(status_code=413, detail=f"File too large: {size_mb:.2f} MB > {MAX_FILE_SIZE_MB} MB")
 
-class ParseResponse(BaseModel):
-    success: bool
-    message: str
-    total_pages: int
-    results: List[PageResult]
-    combined_markdown: Optional[str] = None
+def _unique_output_dir(stem: str) -> Path:
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    out = OUTPUT_BASE_DIR / f"{stem}-{ts}"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
 
-# ================= App & Lifespan =================
+def _zip_directory(src_dir: Path, zip_path: Path):
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in src_dir.rglob("*"):
+            if p.is_file():
+                zf.write(p, p.relative_to(src_dir))
+
+def _build_predict_kwargs() -> dict:
+    # Enable end-to-end table recognition switches when SLANet_plus is used
+    use_e2e = False
+    if USE_TABLE_RECOGNITION:
+        if str(WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME).lower().startswith("slanet") or \
+           str(WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME).lower().startswith("slanet"):
+            use_e2e = True
+    return {
+        # end-to-end table recognition flags (only affect when SLANet_plus models are active)
+        "use_e2e_wired_table_rec_model": use_e2e,
+        "use_e2e_wireless_table_rec_model": use_e2e,
+    }
+
+def _collect_markdown_and_images(res) -> dict:
+    # Each result has a .markdown property that contains text and image map
+    md_info = getattr(res, "markdown", None)
+    if not isinstance(md_info, dict):
+        return {"markdown_texts": "", "markdown_images": {}}
+    md_texts = md_info.get("markdown_texts") or md_info.get("markdown", "") or ""
+    md_images = md_info.get("markdown_images", {}) or {}
+    return {"markdown_texts": md_texts, "markdown_images": md_images}
+
+def _concatenate_pages(pipeline: PPStructureV3, md_list: List[dict]) -> str:
+    # Try the public API first; fallback to paddlex_pipeline for older builds
+    if hasattr(pipeline, "concatenate_markdown_pages"):
+        return pipeline.concatenate_markdown_pages(md_list)
+    if hasattr(pipeline, "paddlex_pipeline") and hasattr(pipeline.paddlex_pipeline, "concatenate_markdown_pages"):
+        return pipeline.paddlex_pipeline.concatenate_markdown_pages(md_list)
+    # Fallback: manual join
+    return "\n\n".join([item.get("markdown_texts", "") for item in md_list])
+
+def _parse_with_pipeline(pipeline: PPStructureV3, input_path: Path, out_dir: Path) -> dict:
+    predict_kwargs = _build_predict_kwargs()
+    outputs = pipeline.predict(input=str(input_path), **predict_kwargs)
+    is_pdf = input_path.suffix.lower() == ".pdf"
+
+    page_summaries = []
+    markdown_pages_info = []
+
+    # Save per-page artifacts
+    for i, res in enumerate(outputs):
+        # Save per-page JSON and Markdown
+        res.save_to_json(save_path=str(out_dir))
+        res.save_to_markdown(save_path=str(out_dir))
+
+        # Collect markdown text and images for concatenation
+        page_md = _collect_markdown_and_images(res)
+        markdown_pages_info.append(page_md)
+
+        # Derive filenames produced by save_to_*:
+        # By default, the pipeline uses the input stem (plus page index for PDFs) for filenames.
+        # To make paths deterministic, infer by scanning directory for the most recent files that match page index.
+        # Simplify by computing conventional names:
+        stem = input_path.stem
+        page_tag = f"_p{i+1}" if is_pdf else ""
+        json_file = out_dir / f"{stem}{page_tag}.json"
+        md_file = out_dir / f"{stem}{page_tag}.md"
+        # If files do not exist under the conventional name, fall back to listing:
+        if not json_file.exists():
+            candidates = sorted(out_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            json_file = candidates[0] if candidates else None
+        if not md_file.exists():
+            candidates = sorted(out_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+            # Avoid picking the combined md if already present
+            md_file = next((p for p in candidates if "combined" not in p.stem), candidates[0] if candidates else None)
+
+        page_summaries.append({
+            "page_index": i + 1,
+            "json_file": str(json_file) if json_file else None,
+            "markdown_file": str(md_file) if md_file else None,
+        })
+
+    combined_markdown_file = None
+    combined_markdown_text = None
+
+    # For PDFs (or multi-image batches), create combined Markdown
+    if len(markdown_pages_info) > 1 or is_pdf:
+        combined_markdown_text = _concatenate_pages(pipeline, markdown_pages_info)
+        combined_markdown_file = out_dir / f"{input_path.stem}_combined.md"
+        combined_markdown_file.write_text(combined_markdown_text, encoding="utf-8")
+
+        # Persist page-level markdown images
+        for page in markdown_pages_info:
+            md_imgs = page.get("markdown_images") or {}
+            for rel_path, pil_img in md_imgs.items():
+                img_path = out_dir / rel_path
+                img_path.parent.mkdir(parents=True, exist_ok=True)
+                pil_img.save(img_path)
+
+    # Zip all artifacts for convenient download
+    zip_path = out_dir.with_suffix(".zip")
+    _zip_directory(out_dir, zip_path)
+
+    return {
+        "input": str(input_path),
+        "output_dir": str(out_dir),
+        "zip_file": str(zip_path),
+        "pages": page_summaries,
+        "combined_markdown_file": str(combined_markdown_file) if combined_markdown_file else None,
+        "combined_markdown_text": combined_markdown_text,
+    }
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize PPStructureV3 pipeline with all configured parameters
     app.state.pipeline = PPStructureV3(
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
         cpu_threads=CPU_THREADS,
+
+        # Model overrides
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
@@ -92,6 +212,8 @@ async def lifespan(app: FastAPI):
         table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
         formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
         chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+
+        # Thresholds and batch sizes (None -> defaults)
         layout_threshold=LAYOUT_THRESHOLD,
         text_det_thresh=TEXT_DET_THRESH,
         text_det_box_thresh=TEXT_DET_BOX_THRESH,
@@ -100,6 +222,8 @@ async def lifespan(app: FastAPI):
         text_det_limit_type=TEXT_DET_LIMIT_TYPE,
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+
+        # Sub-pipeline toggles
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
@@ -109,333 +233,62 @@ async def lifespan(app: FastAPI):
     )
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
     yield
-    # Cleanup (if needed)
 
-app = FastAPI(
-    title="PPStructureV3 Parse API", 
-    version="3.2.0",
-    description="Document parsing API using PPStructureV3 - converts PDFs and images to structured JSON and Markdown",
-    lifespan=lifespan
-)
+app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
 
-# ================= Helper Functions =================
-def validate_file(file: UploadFile) -> None:
-    """Validate uploaded file extension and size"""
-    file_ext = Path(file.filename).suffix.lower()
-    if file_ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
-        )
-
-def encode_image_to_base64(image) -> str:
-    """Convert PIL Image to base64 string"""
-    import io
-    buffered = io.BytesIO()
-    image.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode('utf-8')
-
-def process_result(result) -> Dict[str, Any]:
-    """
-    Process a single PPStructureV3 result object into structured format
-    Extracts JSON and Markdown outputs
-    """
-    # Get JSON result
-    json_result = result.json if hasattr(result, 'json') else {}
-    
-    # Get Markdown result
-    markdown_dict = result.markdown if hasattr(result, 'markdown') else {}
-    
-    # Convert markdown images to base64 if they exist
-    markdown_images = {}
-    if 'markdown_images' in markdown_dict:
-        for img_path, img_obj in markdown_dict['markdown_images'].items():
-            markdown_images[img_path] = encode_image_to_base64(img_obj)
-    
-    markdown_output = MarkdownOutput(
-        text=markdown_dict.get('markdown_text', ''),
-        images=markdown_images,
-        isStart=markdown_dict.get('isStart', True),
-        isEnd=markdown_dict.get('isEnd', True)
-    )
-    
-    return {
-        'json_result': json_result,
-        'markdown': markdown_output
-    }
-
-async def parse_document(
-    pipeline,
-    file_path: str,
-    use_doc_orientation_classify: Optional[bool] = None,
-    use_doc_unwarping: Optional[bool] = None,
-    use_textline_orientation: Optional[bool] = None,
-    use_table_recognition: Optional[bool] = None,
-    use_formula_recognition: Optional[bool] = None,
-    use_chart_recognition: Optional[bool] = None,
-    combine_markdown: bool = True
-) -> ParseResponse:
-    """
-    Parse document using PPStructureV3 pipeline
-    
-    Args:
-        pipeline: PPStructureV3 instance
-        file_path: Path to the file to parse
-        use_doc_orientation_classify: Enable document orientation classification
-        use_doc_unwarping: Enable document unwarping
-        use_textline_orientation: Enable text line orientation
-        use_table_recognition: Enable table recognition
-        use_formula_recognition: Enable formula recognition
-        use_chart_recognition: Enable chart recognition
-        combine_markdown: Combine all pages into single markdown (for PDFs)
-    
-    Returns:
-        ParseResponse with results
-    """
-    try:
-        # Prepare prediction parameters
-        predict_params = {
-            'input': file_path,
-        }
-        
-        # Add optional parameters if specified
-        if use_doc_orientation_classify is not None:
-            predict_params['use_doc_orientation_classify'] = use_doc_orientation_classify
-        if use_doc_unwarping is not None:
-            predict_params['use_doc_unwarping'] = use_doc_unwarping
-        if use_textline_orientation is not None:
-            predict_params['use_textline_orientation'] = use_textline_orientation
-        if use_table_recognition is not None:
-            predict_params['use_table_recognition'] = use_table_recognition
-        if use_formula_recognition is not None:
-            predict_params['use_formula_recognition'] = use_formula_recognition
-        if use_chart_recognition is not None:
-            predict_params['use_chart_recognition'] = use_chart_recognition
-        
-        # Run prediction in thread pool
-        output = await run_in_threadpool(
-            lambda: list(pipeline.predict(**predict_params))
-        )
-        
-        # Process each page result
-        page_results = []
-        markdown_list = []
-        
-        for idx, result in enumerate(output):
-            processed = process_result(result)
-            
-            page_result = PageResult(
-                page_index=idx,
-                json_result=processed['json_result'],
-                markdown=processed['markdown']
-            )
-            page_results.append(page_result)
-            
-            # Collect markdown for concatenation
-            if combine_markdown and hasattr(result, 'markdown'):
-                markdown_list.append(result.markdown)
-        
-        # Combine markdown pages if requested and multiple pages exist
-        combined_markdown = None
-        if combine_markdown and len(markdown_list) > 1:
-            combined_markdown = await run_in_threadpool(
-                lambda: pipeline.concatenate_markdown_pages(markdown_list)
-            )
-        
-        return ParseResponse(
-            success=True,
-            message="Document parsed successfully",
-            total_pages=len(page_results),
-            results=page_results,
-            combined_markdown=combined_markdown
-        )
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error during document parsing: {str(e)}"
-        )
-
-# ================= Endpoints =================
 @app.get("/health")
 def health():
-    """Health check endpoint"""
-    return {"status": "ok", "version": "3.2.0", "pipeline": "PPStructureV3"}
+    return {"status": "ok"}
 
-@app.post("/parse", response_model=ParseResponse)
-async def parse_endpoint(
-    file: UploadFile = File(..., description="PDF or image file to parse"),
-    use_doc_orientation_classify: Optional[bool] = Query(
-        None, 
-        description="Enable document orientation classification"
-    ),
-    use_doc_unwarping: Optional[bool] = Query(
-        None,
-        description="Enable document image unwarping"
-    ),
-    use_textline_orientation: Optional[bool] = Query(
-        None,
-        description="Enable text line orientation classification"
-    ),
-    use_table_recognition: Optional[bool] = Query(
-        None,
-        description="Enable table recognition subpipeline"
-    ),
-    use_formula_recognition: Optional[bool] = Query(
-        None,
-        description="Enable formula recognition subpipeline"
-    ),
-    use_chart_recognition: Optional[bool] = Query(
-        None,
-        description="Enable chart parsing module"
-    ),
-    combine_markdown: bool = Query(
-        True,
-        description="Combine all pages into single markdown (for multi-page PDFs)"
-    ),
-    save_outputs: bool = Query(
-        False,
-        description="Save JSON and Markdown files to disk"
-    ),
-    output_dir: Optional[str] = Query(
-        None,
-        description="Directory to save output files (if save_outputs=True)"
-    )
+@app.post("/parse")
+async def parse(
+    file: UploadFile = File(..., description="PDF or image"),
+    combine_pdf: bool = Query(True, description="If PDF with multiple pages, also emit combined Markdown"),
 ):
-    """
-    Parse endpoint for document structure extraction
-    
-    Accepts PDF or image files and returns:
-    - Structured JSON with layout, text, tables, formulas, etc.
-    - Markdown representation with embedded images
-    - Per-page results for multi-page documents
-    
-    The endpoint uses all parameters configured during pipeline initialization
-    including table recognition, model selections, and detection thresholds.
-    """
-    # Validate file
-    validate_file(file)
-    
-    # Check file size
-    file.file.seek(0, 2)  # Seek to end
-    file_size_mb = file.file.tell() / (1024 * 1024)
-    file.file.seek(0)  # Reset to beginning
-    
-    if file_size_mb > MAX_FILE_SIZE_MB:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File size ({file_size_mb:.2f}MB) exceeds limit ({MAX_FILE_SIZE_MB}MB)"
-        )
-    
-    # Create temporary file
-    temp_dir = tempfile.mkdtemp()
-    temp_file_path = None
-    
-    try:
-        # Save uploaded file to temporary location
-        file_ext = Path(file.filename).suffix
-        temp_file_path = Path(temp_dir) / f"input{file_ext}"
-        
-        with open(temp_file_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-        
-        # Acquire semaphore for prediction
-        app.state.predict_sem.acquire()
-        
-        try:
-            # Parse document
-            response = await parse_document(
-                pipeline=app.state.pipeline,
-                file_path=str(temp_file_path),
-                use_doc_orientation_classify=use_doc_orientation_classify,
-                use_doc_unwarping=use_doc_unwarping,
-                use_textline_orientation=use_textline_orientation,
-                use_table_recognition=use_table_recognition,
-                use_formula_recognition=use_formula_recognition,
-                use_chart_recognition=use_chart_recognition,
-                combine_markdown=combine_markdown
-            )
-            
-            # Optionally save outputs to disk
-            if save_outputs:
-                save_dir = Path(output_dir) if output_dir else Path("output")
-                save_dir.mkdir(parents=True, exist_ok=True)
-                
-                # Save per-page results
-                for page_result in response.results:
-                    page_idx = page_result.page_index
-                    
-                    # Save JSON
-                    json_path = save_dir / f"page_{page_idx}.json"
-                    with open(json_path, "w", encoding="utf-8") as f:
-                        json.dump(page_result.json_result, f, ensure_ascii=False, indent=2)
-                    
-                    # Save Markdown
-                    md_path = save_dir / f"page_{page_idx}.md"
-                    with open(md_path, "w", encoding="utf-8") as f:
-                        f.write(page_result.markdown.text)
-                    
-                    # Save markdown images
-                    for img_path, img_base64 in page_result.markdown.images.items():
-                        full_img_path = save_dir / img_path
-                        full_img_path.parent.mkdir(parents=True, exist_ok=True)
-                        img_data = base64.b64decode(img_base64)
-                        with open(full_img_path, "wb") as f:
-                            f.write(img_data)
-                
-                # Save combined markdown if available
-                if response.combined_markdown:
-                    combined_path = save_dir / "combined.md"
-                    with open(combined_path, "w", encoding="utf-8") as f:
-                        f.write(response.combined_markdown)
-            
-            return response
-            
-        finally:
-            app.state.predict_sem.release()
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal server error: {str(e)}"
-        )
-    finally:
-        # Cleanup temporary files
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+    # Persist upload to a temp file
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        suffix = Path(file.filename).suffix
+        in_path = tmpdir / f"input{suffix}"
+        # Stream to disk and measure size
+        size = 0
+        with in_path.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                out.write(chunk)
+        # Validate size/ext
+        _validate_file(in_path)
 
-@app.get("/")
-def root():
-    """Root endpoint with API information"""
-    return {
-        "name": "PPStructureV3 Parse API",
-        "version": "3.2.0",
-        "description": "Document parsing service using PaddleOCR PPStructureV3",
-        "endpoints": {
-            "/health": "Health check",
-            "/parse": "Parse documents (POST with file upload)",
-            "/docs": "Interactive API documentation",
-        },
-        "features": {
-            "layout_detection": True,
-            "table_recognition": USE_TABLE_RECOGNITION,
-            "formula_recognition": USE_FORMULA_RECOGNITION,
-            "chart_recognition": USE_CHART_RECOGNITION,
-            "text_ocr": True,
-            "markdown_export": True,
-            "json_export": True,
-        },
-        "models": {
-            "layout_detection": LAYOUT_DETECTION_MODEL_NAME,
-            "text_detection": TEXT_DETECTION_MODEL_NAME,
-            "text_recognition": TEXT_RECOGNITION_MODEL_NAME,
-            "table_structure": WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        }
-    }
+        # Create a persistent output dir for artifacts
+        out_dir = _unique_output_dir(Path(file.filename).stem)
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        # Limit concurrent predicts
+        async with _SemaphoreAsyncCtx(app.state.predict_sem):
+            # Run parsing in a thread to avoid blocking event loop
+            result = await run_in_threadpool(_parse_with_pipeline, app.state.pipeline, in_path, out_dir)
+
+        # Optionally drop combined markdown for non-PDF or if disabled
+        if not combine_pdf and result.get("combined_markdown_file"):
+            # Remove combined artifacts if not requested
+            cmf = Path(result["combined_markdown_file"])
+            if cmf.exists():
+                cmf.unlink()
+            result["combined_markdown_file"] = None
+            result["combined_markdown_text"] = None
+
+        return JSONResponse(content=result)
+
+class _SemaphoreAsyncCtx:
+    def __init__(self, sem: threading.Semaphore):
+        self.sem = sem
+    async def __aenter__(self):
+        loop = threading.get_ident()
+        # Acquire in a threadpool to avoid blocking
+        await run_in_threadpool(self.sem.acquire)
+        return self
+    async def __aexit__(self, exc_type, exc, tb):
+        self.sem.release()
+        return False
