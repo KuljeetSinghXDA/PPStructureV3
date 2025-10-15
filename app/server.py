@@ -3,14 +3,14 @@ import tempfile
 import threading
 import json
 import shutil
+import base64
+import io
 from pathlib import Path
-from typing import List, Literal, Optional, Dict, Any, Union
+from typing import List, Literal, Optional
 from contextlib import asynccontextmanager
-from io import BytesIO
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
-import base64
 from PIL import Image
 
 ENABLE_HPI = False
@@ -18,45 +18,50 @@ ENABLE_MKLDNN = True
 
 from paddleocr import PPStructureV3
 
-# ================= Core Configuration (Pinned Values) =================
+# ================= Core Configuration (Pinned Values for Pinnacle Accuracy) =================
 DEVICE = "cpu"
-CPU_THREADS = 4
+CPU_THREADS = 8  # Increased for better CPU utilization
 
-# Optional accuracy boosters
-USE_DOC_ORIENTATION_CLASSIFY = False
-USE_DOC_UNWARPING = False
-USE_TEXTLINE_ORIENTATION = False
+# Accuracy boosters enabled for pinnacle performance
+USE_DOC_ORIENTATION_CLASSIFY = True
+USE_DOC_UNWARPING = True
+USE_TEXTLINE_ORIENTATION = True
 
-# Subpipeline toggles
+# All subpipelines enabled for comprehensive parsing
 USE_TABLE_RECOGNITION = True
-USE_FORMULA_RECOGNITION = False
-USE_CHART_RECOGNITION = False
+USE_FORMULA_RECOGNITION = True
+USE_CHART_RECOGNITION = True
 
-# Model overrides
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
-TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
+# Model overrides for highest accuracy (server/large models where applicable)
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_server_det"
+TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_server_rec"
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANeXt_wired_structure_rec"
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANeXt_wireless_structure_rec"
 TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
-FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
+FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-L"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters
-LAYOUT_THRESHOLD = None
-TEXT_DET_THRESH = None
-TEXT_DET_BOX_THRESH = None
-TEXT_DET_UNCLIP_RATIO = None
-TEXT_DET_LIMIT_SIDE_LEN = None
-TEXT_DET_LIMIT_TYPE = None
-TEXT_REC_SCORE_THRESH = None
-TEXT_RECOGNITION_BATCH_SIZE = None
-
+# Optimized detection/recognition parameters for accuracy
+LAYOUT_THRESHOLD = None  # Default 0.5
+TEXT_DET_THRESH = None   # Default 0.3
+TEXT_DET_BOX_THRESH = None  # Default 0.6
+TEXT_DET_UNCLIP_RATIO = None  # Default 2.0
+TEXT_DET_LIMIT_SIDE_LEN = 4096  # Higher limit for better accuracy on large docs
+TEXT_DET_LIMIT_TYPE = "max"
+TEXT_REC_SCORE_THRESH = None  # Default 0.0 (no threshold for completeness)
+TEXT_RECOGNITION_BATCH_SIZE = 1  # Conservative batch for CPU stability
 
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
+
+def pil_to_base64(img: Image.Image) -> str:
+    """Convert PIL Image to base64 string."""
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
 
 # ================= App & Lifespan =================
 @asynccontextmanager
@@ -66,6 +71,7 @@ async def lifespan(app: FastAPI):
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
         cpu_threads=CPU_THREADS,
+        lang="en",  # English for optimal text recognition
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
@@ -101,134 +107,75 @@ def health():
 @app.post("/parse")
 async def parse(
     file: UploadFile = File(..., description="Document file (image or PDF)"),
-    # Module toggles
-    use_doc_orientation_classify: Optional[bool] = Query(None, description="Enable document orientation classification"),
-    use_doc_unwarping: Optional[bool] = Query(None, description="Enable document unwarping"),
-    use_textline_orientation: Optional[bool] = Query(None, description="Enable textline orientation classification"),
-    use_seal_recognition: Optional[bool] = Query(None, description="Enable seal recognition"),
-    use_table_recognition: Optional[bool] = Query(None, description="Enable table recognition"),
-    use_formula_recognition: Optional[bool] = Query(None, description="Enable formula recognition"),
-    use_chart_recognition: Optional[bool] = Query(None, description="Enable chart recognition"),
-    use_region_detection: Optional[bool] = Query(None, description="Enable region detection"),
-    # Table-specific
-    use_wired_table_cells_trans_to_html: Optional[bool] = Query(None, description="Enable wired table to HTML conversion"),
-    use_wireless_table_cells_trans_to_html: Optional[bool] = Query(None, description="Enable wireless table to HTML conversion"),
-    use_table_orientation_classify: Optional[bool] = Query(None, description="Enable table orientation classification"),
-    use_ocr_results_with_table_cells: Optional[bool] = Query(None, description="Use OCR with table cells"),
-    use_e2e_wired_table_rec_model: Optional[bool] = Query(None, description="Use E2E wired table model"),
-    use_e2e_wireless_table_rec_model: Optional[bool] = Query(None, description="Use E2E wireless table model"),
-    # Thresholds and limits (simple float/int for ease; dicts not supported in query)
-    layout_threshold: Optional[float] = Query(None, description="Layout detection threshold (0-1)"),
-    text_det_thresh: Optional[float] = Query(None, description="Text detection pixel threshold"),
-    text_det_box_thresh: Optional[float] = Query(None, description="Text detection box threshold"),
-    text_det_unclip_ratio: Optional[float] = Query(None, description="Text detection unclip ratio"),
-    text_det_limit_side_len: Optional[int] = Query(None, description="Text detection side length limit"),
-    text_det_limit_type: Optional[Literal["min", "max"]] = Query(None, description="Text detection limit type"),
-    text_rec_score_thresh: Optional[float] = Query(None, description="Text recognition score threshold"),
-    # Visualization
-    visualize: bool = Query(False, description="Include base64-encoded images in response"),
+    output_format: Literal["json", "markdown"] = Query("json", description="Output format"),
+    visualize: bool = Query(False, description="Include base64-encoded visualization images")
 ):
     # Validate file
-    if not file:
-        raise HTTPException(status_code=400, detail="No file provided")
-    
-    ext = Path(file.filename).suffix.lower() if file.filename else ""
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}. Allowed: {ALLOWED_EXTENSIONS}")
+    filename = file.filename.lower()
+    if not any(filename.endswith(ext) for ext in ALLOWED_EXTENSIONS):
+        raise HTTPException(status_code=400, detail="Invalid file type. Supported: " + ", ".join(ALLOWED_EXTENSIONS))
     
     content = await file.read()
     if len(content) > MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise HTTPException(status_code=400, detail=f"File size exceeds {MAX_FILE_SIZE_MB}MB")
-    
-    # Save to temp file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
+        raise HTTPException(status_code=400, detail="File too large (max 50MB)")
+
+    # Create temp file
+    suffix = Path(filename).suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_file.write(content)
-        tmp_path = tmp_file.name
-    
+        tmp_path = Path(tmp_file.name)
+
+    sem = app.state.predict_sem
+    if not sem.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="Too many concurrent requests. Max parallel: 1")
+
     try:
-        # Prepare overrides dict
-        overrides: Dict[str, Any] = {}
-        locals_dict = locals()
-        for param in [
-            'use_doc_orientation_classify', 'use_doc_unwarping', 'use_textline_orientation',
-            'use_seal_recognition', 'use_table_recognition', 'use_formula_recognition',
-            'use_chart_recognition', 'use_region_detection',
-            'use_wired_table_cells_trans_to_html', 'use_wireless_table_cells_trans_to_html',
-            'use_table_orientation_classify', 'use_ocr_results_with_table_cells',
-            'use_e2e_wired_table_rec_model', 'use_e2e_wireless_table_rec_model',
-            'layout_threshold', 'text_det_thresh', 'text_det_box_thresh', 'text_det_unclip_ratio',
-            'text_det_limit_side_len', 'text_det_limit_type', 'text_rec_score_thresh'
-        ]:
-            if locals_dict[param] is not None:
-                overrides[param] = locals_dict[param]
+        # Run prediction in threadpool
+        results = await run_in_threadpool(app.state.pipeline.predict, str(tmp_path))
         
-        def do_predict() -> List[Any]:
-            app.state.predict_sem.acquire()
-            try:
-                return app.state.pipeline.predict(tmp_path, **overrides)
-            finally:
-                app.state.predict_sem.release()
+        # Handle single or multi-page output
+        if len(results) == 0:
+            raise HTTPException(status_code=500, detail="No results from pipeline")
+
+        output = {}
         
-        output = await run_in_threadpool(do_predict)
-        
-        # Process results
-        pages: List[Dict[str, Any]] = []
-        for idx, res in enumerate(output):
-            # Pruned result (remove input_path and page_index)
-            page_dict = res.json.copy()
-            page_dict.pop('input_path', None)
-            page_dict.pop('page_index', None)
-            
-            # Add markdown info
-            md_info = res.markdown
-            page_dict['markdown'] = {
-                'text': md_info['markdown_texts'],
-                'is_start': md_info['page_continuation_flags'][0],
-                'is_end': md_info['page_continuation_flags'][1],
-            }
-            
-            if visualize:
-                # Visualization images
-                viz_images = {}
-                for key, img in res.img.items():
-                    if isinstance(img, Image.Image):
-                        buf = BytesIO()
-                        img.save(buf, format='PNG')
-                        viz_images[f'{key}.png'] = base64.b64encode(buf.getvalue()).decode('utf-8')
-                page_dict['visualization_images'] = viz_images
+        if output_format == "json":
+            output["pages"] = []
+            for i, res in enumerate(results):
+                page_res = res.json["res"].copy()  # Deep copy to avoid mutations
                 
-                # Markdown images
-                md_images = {}
-                for rel_path, img in md_info.get('markdown_images', {}).items():
-                    if isinstance(img, Image.Image):
-                        buf = BytesIO()
-                        img.save(buf, format='PNG')
-                        md_images[rel_path] = base64.b64encode(buf.getvalue()).decode('utf-8')
-                page_dict['markdown']['images'] = md_images
-            
-            pages.append(page_dict)
+                if visualize:
+                    vis_dir = tempfile.mkdtemp()
+                    try:
+                        res.save_to_img(save_path=vis_dir)
+                        page_res["visualizations"] = {}
+                        for vis_file in Path(vis_dir).iterdir():
+                            if vis_file.suffix.lower() == ".png":
+                                with Image.open(vis_file) as img:
+                                    page_res["visualizations"][vis_file.name] = pil_to_base64(img)
+                    finally:
+                        shutil.rmtree(vis_dir, ignore_errors=True)
+                
+                output["pages"].append(page_res)
         
-        response_data = {
-            'result': {
-                'layoutParsingResults': pages
-            },
-            'dataInfo': {
-                'input_file': file.filename,
-                'num_pages': len(pages)
-            }
-        }
-        return JSONResponse(content=response_data)
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+        elif output_format == "markdown":
+            if len(results) > 1:
+                # Merge multi-page markdown
+                from paddleocr import PPStructureV3
+                merged_md = PPStructureV3.concatenate_markdown_pages([r.markdown for r in results])
+                output["text"] = merged_md["markdown_texts"]
+                output["images"] = {k: pil_to_base64(v) for k, v in merged_md["markdown_images"].items()}
+                output["page_continuation_flags"] = merged_md["page_continuation_flags"]
+            else:
+                # Single page
+                md = results[0].markdown
+                output["text"] = md["markdown_texts"]
+                output["images"] = {k: pil_to_base64(v) for k, v in md["markdown_images"].items()}
+                output["page_continuation_flags"] = md["page_continuation_flags"]
+        
+        return JSONResponse(content=output)
     
     finally:
-        # Cleanup temp file
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        # Cleanup
+        sem.release()
+        os.unlink(tmp_path)
