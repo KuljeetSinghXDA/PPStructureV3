@@ -66,35 +66,34 @@ SEAL_TEXT_DETECTION_MODEL_DIR = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
 CHART_RECOGNITION_MODEL_DIR = None
 
-# Thresholds / sizes / batches (medical lab report optimized for ARM64)
-# Layout detection - conservative for medical document structure
-LAYOUT_THRESHOLD = 0.5          # PP-DocLayout-L achieves 90.4% mAP@0.5 - use conservative threshold for medical precision
-LAYOUT_NMS = 0.45               # Slightly tighter NMS to reduce false layout overlaps in dense clinical tables
-LAYOUT_UNCLIP_RATIO = 1.6       # Reduce unclip for precise medical text boundary detection
-LAYOUT_MERGE_BBOXES_MODE = None # Keep default merge behavior for medical layouts
+# Layout thresholds and merging
+LAYOUT_THRESHOLD = 0.40  # keep more marginal layout regions
+LAYOUT_NMS = True         # suppress overlapping layout boxes
+LAYOUT_UNCLIP_RATIO = 1.2 # slightly expand detected layout boxes
+LAYOUT_MERGE_BBOXES_MODE = "large"  # keep outer box for overlapping regions
 
-# Text detection tuning for small fonts typical in lab reports
-TEXT_DET_THRESH = 0.25          # Lower threshold for better recall of small medical text/units
-TEXT_DET_BOX_THRESH = 0.65      # Slightly higher for precision on clinical values  
-TEXT_DET_UNCLIP_RATIO = 1.8     # Reduce unclip ratio for tighter bounding boxes on dense medical text
-TEXT_DET_LIMIT_SIDE_LEN = 1536  # Higher resolution for small text recall on CPU
-TEXT_DET_LIMIT_TYPE = "max"     # Max side limiting for optimal small text detection
+# Text detection tuning
+TEXT_DET_THRESH = 0.25       # increase recall for faint/small characters
+TEXT_DET_BOX_THRESH = 0.50   # allow weaker boxes through for recognition
+TEXT_DET_UNCLIP_RATIO = 1.8  # close gaps in low-contrast strokes
+TEXT_DET_LIMIT_SIDE_LEN = 1536  # upsample fine text moderately
+TEXT_DET_LIMIT_TYPE = "max"  # clamp longest side
 
-# Seals (unused for medical reports)
-SEAL_DET_LIMIT_SIDE_LEN = None
-SEAL_DET_LIMIT_TYPE = None  
-SEAL_DET_THRESH = None
-SEAL_DET_BOX_THRESH = None
-SEAL_DET_UNCLIP_RATIO = None
-SEAL_REC_SCORE_THRESH = None
+# Seals (unused; keep defaults)
+SEAL_DET_LIMIT_SIDE_LEN = 736
+SEAL_DET_LIMIT_TYPE = "min"
+SEAL_DET_THRESH = 0.20
+SEAL_DET_BOX_THRESH = 0.60
+SEAL_DET_UNCLIP_RATIO = 0.50
+SEAL_REC_SCORE_THRESH = 0.00
 
-# Text recognition - high precision filtering for medical accuracy
-TEXT_REC_SCORE_THRESH = 0.88              # Higher threshold to filter unreliable medical values/units
-TEXT_RECOGNITION_BATCH_SIZE = 2           # Small batch for 4-core ARM64 - balances memory and throughput
-TEXTLINE_ORIENTATION_BATCH_SIZE = 4       # Can be higher since it's lightweight
-FORMULA_RECOGNITION_BATCH_SIZE = 1        # Conservative for unused formula detection
-CHART_RECOGNITION_BATCH_SIZE = 1          # Conservative for unused chart recognition  
-SEAL_TEXT_RECOGNITION_BATCH_SIZE = 2      # Conservative for unused seal recognition
+# Text recognition filtering and batch sizes
+TEXT_REC_SCORE_THRESH = 0.85
+TEXT_RECOGNITION_BATCH_SIZE = 8
+TEXTLINE_ORIENTATION_BATCH_SIZE = 8
+FORMULA_RECOGNITION_BATCH_SIZE = 1
+CHART_RECOGNITION_BATCH_SIZE = 1
+SEAL_TEXT_RECOGNITION_BATCH_SIZE = 1
 
 # Backend knobs (ARM64 optimized)
 ENABLE_HPI = False                        # HPI not supported on ARM64
