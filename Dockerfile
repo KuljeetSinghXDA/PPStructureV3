@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m pip install -U pip --root-user-action=ignore && \
     python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/ --root-user-action=ignore && \
     python -m pip install "paddleocr[all]" fastapi uvicorn[standard] python-multipart --root-user-action=ignore && \
-    python -m pip install "pymupdf>=1.25,<2" --root-user-action=ignore
+    python -m pip install "pymupdf" --root-user-action=ignore
 
 # If your platform lacks a PyMuPDF wheel (rare), uncomment the fallback below:
 # RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config \
