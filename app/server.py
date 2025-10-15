@@ -18,39 +18,39 @@ ENABLE_MKLDNN = True
 
 from paddleocr import PPStructureV3
 
-# ================= Core Configuration (Pinned Values for Pinnacle Accuracy) =================
+# ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
-CPU_THREADS = 8  # Increased for better CPU utilization
+CPU_THREADS = 4
 
-# Accuracy boosters enabled for pinnacle performance
-USE_DOC_ORIENTATION_CLASSIFY = True
-USE_DOC_UNWARPING = True
-USE_TEXTLINE_ORIENTATION = True
+# Optional accuracy boosters
+USE_DOC_ORIENTATION_CLASSIFY = False
+USE_DOC_UNWARPING = False
+USE_TEXTLINE_ORIENTATION = False
 
-# All subpipelines enabled for comprehensive parsing
+# Subpipeline toggles
 USE_TABLE_RECOGNITION = True
-USE_FORMULA_RECOGNITION = True
-USE_CHART_RECOGNITION = True
+USE_FORMULA_RECOGNITION = False
+USE_CHART_RECOGNITION = False
 
-# Model overrides for highest accuracy (server/large models where applicable)
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_server_det"
-TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_server_rec"
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANeXt_wired_structure_rec"
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANeXt_wireless_structure_rec"
+# Model overrides
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
+TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
-FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-L"
+FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Optimized detection/recognition parameters for accuracy
-LAYOUT_THRESHOLD = None  # Default 0.5
-TEXT_DET_THRESH = None   # Default 0.3
-TEXT_DET_BOX_THRESH = None  # Default 0.6
-TEXT_DET_UNCLIP_RATIO = None  # Default 2.0
-TEXT_DET_LIMIT_SIDE_LEN = 4096  # Higher limit for better accuracy on large docs
-TEXT_DET_LIMIT_TYPE = "max"
-TEXT_REC_SCORE_THRESH = None  # Default 0.0 (no threshold for completeness)
-TEXT_RECOGNITION_BATCH_SIZE = 1  # Conservative batch for CPU stability
+# Detection/recognition parameters
+LAYOUT_THRESHOLD = None
+TEXT_DET_THRESH = None
+TEXT_DET_BOX_THRESH = None
+TEXT_DET_UNCLIP_RATIO = None
+TEXT_DET_LIMIT_SIDE_LEN = None
+TEXT_DET_LIMIT_TYPE = None
+TEXT_REC_SCORE_THRESH = None
+TEXT_RECOGNITION_BATCH_SIZE = None
 
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
