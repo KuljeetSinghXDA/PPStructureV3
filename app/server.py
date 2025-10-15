@@ -4,11 +4,14 @@ import threading
 import json
 import shutil
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Dict, Any, Union
 from contextlib import asynccontextmanager
+from io import BytesIO
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
+import base64
+from PIL import Image
 
 ENABLE_HPI = False
 ENABLE_MKLDNN = True
@@ -94,146 +97,138 @@ app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifesp
 @app.get("/health")
 def health():
     return {"status": "ok"}
-    
+
 @app.post("/parse")
 async def parse(
-    file: UploadFile = File(...),
-    output_format: Literal["json", "markdown", "excel"] = Query("json", description="Output format for the structured result"),
-    lang: Optional[str] = Query("en", description="Language for OCR (e.g., 'en', 'ch', 'fr')"),
-    recovery: bool = Query(False, description="Enable recovery mode for distorted documents"),
-    save_folder: Optional[str] = Query(None, description="Optional folder to save intermediate results like images or tables")
+    file: UploadFile = File(..., description="Document file (image or PDF)"),
+    # Module toggles
+    use_doc_orientation_classify: Optional[bool] = Query(None, description="Enable document orientation classification"),
+    use_doc_unwarping: Optional[bool] = Query(None, description="Enable document unwarping"),
+    use_textline_orientation: Optional[bool] = Query(None, description="Enable textline orientation classification"),
+    use_seal_recognition: Optional[bool] = Query(None, description="Enable seal recognition"),
+    use_table_recognition: Optional[bool] = Query(None, description="Enable table recognition"),
+    use_formula_recognition: Optional[bool] = Query(None, description="Enable formula recognition"),
+    use_chart_recognition: Optional[bool] = Query(None, description="Enable chart recognition"),
+    use_region_detection: Optional[bool] = Query(None, description="Enable region detection"),
+    # Table-specific
+    use_wired_table_cells_trans_to_html: Optional[bool] = Query(None, description="Enable wired table to HTML conversion"),
+    use_wireless_table_cells_trans_to_html: Optional[bool] = Query(None, description="Enable wireless table to HTML conversion"),
+    use_table_orientation_classify: Optional[bool] = Query(None, description="Enable table orientation classification"),
+    use_ocr_results_with_table_cells: Optional[bool] = Query(None, description="Use OCR with table cells"),
+    use_e2e_wired_table_rec_model: Optional[bool] = Query(None, description="Use E2E wired table model"),
+    use_e2e_wireless_table_rec_model: Optional[bool] = Query(None, description="Use E2E wireless table model"),
+    # Thresholds and limits (simple float/int for ease; dicts not supported in query)
+    layout_threshold: Optional[float] = Query(None, description="Layout detection threshold (0-1)"),
+    text_det_thresh: Optional[float] = Query(None, description="Text detection pixel threshold"),
+    text_det_box_thresh: Optional[float] = Query(None, description="Text detection box threshold"),
+    text_det_unclip_ratio: Optional[float] = Query(None, description="Text detection unclip ratio"),
+    text_det_limit_side_len: Optional[int] = Query(None, description="Text detection side length limit"),
+    text_det_limit_type: Optional[Literal["min", "max"]] = Query(None, description="Text detection limit type"),
+    text_rec_score_thresh: Optional[float] = Query(None, description="Text recognition score threshold"),
+    # Visualization
+    visualize: bool = Query(False, description="Include base64-encoded images in response"),
 ):
-    # Validate file extension
-    file_ext = Path(file.filename).suffix.lower()
-    if file_ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported file extension: {file_ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+    # Validate file
+    if not file:
+        raise HTTPException(status_code=400, detail="No file provided")
     
-    # Validate file size (approximate check via content length if available, otherwise read in chunks)
-    content_length = file.headers.get("content-length")
-    if content_length and int(content_length) > MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise HTTPException(status_code=400, detail=f"File size exceeds {MAX_FILE_SIZE_MB} MB limit")
+    ext = Path(file.filename).suffix.lower() if file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}. Allowed: {ALLOWED_EXTENSIONS}")
     
-    # Read file contents
-    contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise HTTPException(status_code=400, detail=f"File size exceeds {MAX_FILE_SIZE_MB} MB limit")
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"File size exceeds {MAX_FILE_SIZE_MB}MB")
     
-    # Acquire semaphore for parallel prediction control
-    if not app.state.predict_sem.acquire(blocking=False):
-        raise HTTPException(status_code=503, detail="Server busy: Maximum parallel predictions reached")
+    # Save to temp file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
+        tmp_file.write(content)
+        tmp_path = tmp_file.name
     
     try:
-        # Create temporary file for input
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_input:
-            tmp_input.write(contents)
-            tmp_input_path = tmp_input.name
+        # Prepare overrides dict
+        overrides: Dict[str, Any] = {}
+        locals_dict = locals()
+        for param in [
+            'use_doc_orientation_classify', 'use_doc_unwarping', 'use_textline_orientation',
+            'use_seal_recognition', 'use_table_recognition', 'use_formula_recognition',
+            'use_chart_recognition', 'use_region_detection',
+            'use_wired_table_cells_trans_to_html', 'use_wireless_table_cells_trans_to_html',
+            'use_table_orientation_classify', 'use_ocr_results_with_table_cells',
+            'use_e2e_wired_table_rec_model', 'use_e2e_wireless_table_rec_model',
+            'layout_threshold', 'text_det_thresh', 'text_det_box_thresh', 'text_det_unclip_ratio',
+            'text_det_limit_side_len', 'text_det_limit_type', 'text_rec_score_thresh'
+        ]:
+            if locals_dict[param] is not None:
+                overrides[param] = locals_dict[param]
         
-        # Prepare save folder if specified
-        temp_save_dir = None
-        if save_folder:
-            temp_save_dir = tempfile.mkdtemp(dir=save_folder)
-        else:
-            temp_save_dir = tempfile.mkdtemp()
+        def do_predict() -> List[Any]:
+            app.state.predict_sem.acquire()
+            try:
+                return app.state.pipeline.predict(tmp_path, **overrides)
+            finally:
+                app.state.predict_sem.release()
         
-        # Dynamically override language if not English (PPStructureV3 supports lang parameter)
-        pipeline_kwargs = {}
-        if lang != "en":
-            pipeline_kwargs["lang"] = lang
+        output = await run_in_threadpool(do_predict)
         
-        # Run prediction in threadpool to avoid blocking the event loop
-        result = await run_in_threadpool(
-            app.state.pipeline,
-            img=tmp_input_path,
-            recovery=recovery,
-            save_path=temp_save_dir,
-            **pipeline_kwargs
-        )
+        # Process results
+        pages: List[Dict[str, Any]] = []
+        for idx, res in enumerate(output):
+            # Pruned result (remove input_path and page_index)
+            page_dict = res.json.copy()
+            page_dict.pop('input_path', None)
+            page_dict.pop('page_index', None)
+            
+            # Add markdown info
+            md_info = res.markdown
+            page_dict['markdown'] = {
+                'text': md_info['markdown_texts'],
+                'is_start': md_info['page_continuation_flags'][0],
+                'is_end': md_info['page_continuation_flags'][1],
+            }
+            
+            if visualize:
+                # Visualization images
+                viz_images = {}
+                for key, img in res.img.items():
+                    if isinstance(img, Image.Image):
+                        buf = BytesIO()
+                        img.save(buf, format='PNG')
+                        viz_images[f'{key}.png'] = base64.b64encode(buf.getvalue()).decode('utf-8')
+                page_dict['visualization_images'] = viz_images
+                
+                # Markdown images
+                md_images = {}
+                for rel_path, img in md_info.get('markdown_images', {}).items():
+                    if isinstance(img, Image.Image):
+                        buf = BytesIO()
+                        img.save(buf, format='PNG')
+                        md_images[rel_path] = base64.b64encode(buf.getvalue()).decode('utf-8')
+                page_dict['markdown']['images'] = md_images
+            
+            pages.append(page_dict)
         
-        # Process result based on output format
-        if output_format == "json":
-            # PPStructureV3 returns a list of dicts; serialize directly
-            output_data = json.dumps(result, ensure_ascii=False, indent=2)
-            response = PlainTextResponse(content=output_data, media_type="application/json")
-        elif output_format == "markdown":
-            # Convert structure to markdown (custom logic for text, tables, etc.)
-            md_content = convert_to_markdown(result)
-            response = PlainTextResponse(content=md_content, media_type="text/markdown")
-        elif output_format == "excel" and result_has_tables(result):
-            # Save tables to Excel if present
-            excel_path = os.path.join(temp_save_dir, "output.xlsx")
-            save_to_excel(result, excel_path)
-            response = JSONResponse(content={"message": "Excel generated", "excel_path": excel_path})
-        else:
-            response = JSONResponse(content=result)
-        
-        return response
+        response_data = {
+            'result': {
+                'layoutParsingResults': pages
+            },
+            'dataInfo': {
+                'input_file': file.filename,
+                'num_pages': len(pages)
+            }
+        }
+        return JSONResponse(content=response_data)
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
     
     finally:
-        # Cleanup
-        app.state.predict_sem.release()
-        os.unlink(tmp_input_path)
-        if not save_folder and temp_save_dir:
-            shutil.rmtree(temp_save_dir, ignore_errors=True)
+        # Cleanup temp file
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
-def result_has_tables(result):
-    """Check if result contains table elements."""
-    return any(block.get("type") == "table" for page in result for block in page)
-
-def convert_to_markdown(result: List[dict]) -> str:
-    """Convert PPStructureV3 result to Markdown format."""
-    md_lines = []
-    for page in result:
-        for block in page:
-            block_type = block.get("type", "text")
-            if block_type == "text":
-                md_lines.append(block.get("text", ""))
-            elif block_type == "title":
-                md_lines.append(f"# {block.get('text', '')}")
-            elif block_type == "table":
-                # Convert table html to markdown table
-                html = block.get("res_html", "")
-                md_lines.append(html_to_markdown_table(html))
-            elif block_type == "figure":
-                md_lines.append(f"![Figure]({block.get('img_path', '')})")
-            md_lines.append("\n")
-    return "\n".join(md_lines)
-
-def html_to_markdown_table(html: str) -> str:
-    """Simple HTML table to Markdown conversion."""
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table")
-    if not table:
-        return ""
-    
-    md = []
-    rows = table.find_all("tr")
-    for i, row in enumerate(rows):
-        cols = row.find_all(["td", "th"])
-        cols_text = [col.get_text(strip=True) for col in cols]
-        md.append("| " + " | ".join(cols_text) + " |")
-        if i == 0:
-            md.append("| " + " | ".join(["---"] * len(cols)) + " |")
-    return "\n".join(md)
-
-def save_to_excel(result: List[dict], excel_path: str):
-    """Save tables from result to Excel using pandas/openpyxl."""
-    import pandas as pd
-    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-        table_idx = 1
-        for page_idx, page in enumerate(result):
-            for block_idx, block in enumerate(page):
-                if block.get("type") == "table":
-                    html = block.get("res_html", "")
-                    df = html_table_to_dataframe(html)
-                    df.to_excel(writer, sheet_name=f"Page{page_idx+1}_Table{table_idx}", index=False)
-                    table_idx += 1
-
-def html_table_to_dataframe(html: str) -> pd.DataFrame:
-    """Convert HTML table to pandas DataFrame."""
-    import pandas as pd
-    from io import StringIO
-    return pd.read_html(StringIO(html))[0]
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
