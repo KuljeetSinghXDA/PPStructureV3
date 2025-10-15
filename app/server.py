@@ -1,35 +1,37 @@
-# fastapi_app.py
+go a deep research, take your time and plan /parse endpoint script which should be pinnacle for ppstructurev3. Then generate script /parse endpoint, do not touch  or provide suggestions for other code other than /parse endpoint. 
+
 import os
+import tempfile
+import threading
 import json
 import shutil
-import tempfile
 from pathlib import Path
-from typing import List, Optional, Literal
+from typing import List, Literal, Optional
 from contextlib import asynccontextmanager
-
-import uvicorn
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
-# PaddleOCR PP-StructureV3 pipeline
+ENABLE_HPI = False
+ENABLE_MKLDNN = True
+
 from paddleocr import PPStructureV3
 
-# ================= Service Configuration =================
+# ================= Core Configuration (Pinned Values) =================
 DEVICE = "cpu"
 CPU_THREADS = 4
-ENABLE_MKLDNN = True
-ENABLE_HPI = False
 
-# Subpipeline toggles (explicit booleans)
-USE_DOC_ORIENTATION_CLASSIFY = False
-USE_DOC_UNWARPING = False
-USE_TEXTLINE_ORIENTATION = False
-USE_TABLE_RECOGNITION = True
-USE_FORMULA_RECOGNITION = False
-USE_CHART_RECOGNITION = False
+# Optional accuracy boosters
+USE_DOC_ORIENTATION_CLASSIFY = None
+USE_DOC_UNWARPING = None
+USE_TEXTLINE_ORIENTATION = None
 
-# Model overrides (explicit names)
+# Subpipeline toggles
+USE_TABLE_RECOGNITION = None
+USE_FORMULA_RECOGNITION = None
+USE_CHART_RECOGNITION = None
+
+# Model overrides
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
@@ -39,7 +41,7 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters (high recall but CPU-friendly)
+# Detection/recognition parameters
 LAYOUT_THRESHOLD = None
 TEXT_DET_THRESH = None
 TEXT_DET_BOX_THRESH = None
@@ -49,212 +51,149 @@ TEXT_DET_LIMIT_TYPE = None
 TEXT_REC_SCORE_THRESH = None
 TEXT_RECOGNITION_BATCH_SIZE = None
 
-# I/O and limits
+
+# I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
-MAX_PARALLEL_PREDICT = 1  # tuned for CPU-only
+MAX_PARALLEL_PREDICT = 1
 
-# PDF rasterization
-PDF_DPI_DEFAULT = 300  # 300–400 DPI recommended for small text
-
-# ================= FastAPI App and Lifespan =================
-app = FastAPI(title="PPStructureV3 OCR API", version="2.2.0")
-
+# ================= App & Lifespan =================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import threading
-    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
-    # Single long-lived pipeline
-    app.state.pipeline = PPStructureV3(
-        device=DEVICE,
-        enable_mkldnn=ENABLE_MKLDNN,
-        enable_hpi=ENABLE_HPI,
-        cpu_threads=CPU_THREADS,
-        layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
-        text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
-        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
-        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
-        formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
-        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-        layout_threshold=LAYOUT_THRESHOLD,
-        text_det_thresh=TEXT_DET_THRESH,
-        text_det_box_thresh=TEXT_DET_BOX_THRESH,
-        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
-        text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
-        text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-        use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-        use_table_recognition=USE_TABLE_RECOGNITION,
-        use_formula_recognition=USE_FORMULA_RECOGNITION,
-        use_chart_recognition=USE_CHART_RECOGNITION,
-    )
-    yield
+    app.state.pipeline = PPStructureV3(
+        device=DEVICE,
+        enable_mkldnn=ENABLE_MKLDNN,
+        enable_hpi=ENABLE_HPI,
+        cpu_threads=CPU_THREADS,
+        layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
+        text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
+        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
+        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
+        formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
+        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+        layout_threshold=LAYOUT_THRESHOLD,
+        text_det_thresh=TEXT_DET_THRESH,
+        text_det_box_thresh=TEXT_DET_BOX_THRESH,
+        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
+        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
+        text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
+        text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+        use_doc_unwarping=USE_DOC_UNWARPING,
+        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+        use_table_recognition=USE_TABLE_RECOGNITION,
+        use_formula_recognition=USE_FORMULA_RECOGNITION,
+        use_chart_recognition=USE_CHART_RECOGNITION,
+    )
+    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
+    yield
 
-app.router.lifespan_context = lifespan
+app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok"}
 
-# ================= Helpers =================
-def _suffix(name: str) -> str:
-    return Path(name or "").suffix.lower()
-
-def _validate_upload(file: UploadFile) -> str:
-    if not file or not file.filename:
-        raise HTTPException(status_code=400, detail="Missing file")
-    ext = _suffix(file.filename)
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=415, detail=f"Unsupported file type: {ext}")
-    return ext
-
-def _parse_page_range(page_range_str: Optional[str], num_pages: int) -> List[int]:
-    if not page_range_str:
-        return list(range(num_pages))
-    selected = set()
-    for part in page_range_str.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            a, b = part.split("-", 1)
-            start = int(a) if a else 1
-            end = int(b) if b else num_pages
-            if start > end:
-                raise HTTPException(status_code=400, detail="Invalid page range: start > end")
-            selected.update(range(start - 1, end))
-        else:
-            selected.add(int(part) - 1)
-    return sorted([i for i in selected if 0 <= i < num_pages])
-
-def _rasterize_pdf_pymupdf(pdf_path: Path, out_dir: Path, dpi: int, page_indices: Optional[List[int]] = None) -> List[Path]:
-    import fitz  # PyMuPDF
-    doc = fitz.open(pdf_path.as_posix())
-    try:
-        n = doc.page_count
-        if page_indices is None:
-            page_indices = list(range(n))
-        scale = dpi / 72.0
-        mat = fitz.Matrix(scale, scale)
-        img_paths: List[Path] = []
-        for idx in page_indices:
-            page = doc.load_page(idx)
-            pix = page.get_pixmap(matrix=mat)
-            out_path = out_dir / f"page_{idx+1:04d}.png"
-            pix.save(out_path.as_posix())
-            img_paths.append(out_path)
-        return img_paths
-    finally:
-        doc.close()
-
-# ================= /parse Endpoint =================
 @app.post("/parse")
 async def parse(
-    file: UploadFile = File(..., description="Supported: " + ", ".join(sorted(ALLOWED_EXTENSIONS))),
-    output_format: Literal["json", "markdown"] = Query("json"),
-    page_range: Optional[str] = Query(None, description="1-based ranges for PDFs, e.g., '1-3,5'"),
-    dpi: int = Query(PDF_DPI_DEFAULT, ge=150, le=600, description="PDF rasterization DPI"),
-    use_chart_recognition: Optional[bool] = Query(None, description="Predict-time toggle if supported"),
+    file: UploadFile = File(..., description="The document image or PDF file to process."),
+    lang: Literal["en", "ch", "ch_tra", "ko", "ja"] = Query("en", description="Language of the text in the document."),
+    mode: Literal["structure", "html", "markdown"] = Query("structure", description="Output format for table and formula results.")
 ):
-    ext = _validate_upload(file)
+    """
+    Analyzes an uploaded document (image or PDF) using PPStructureV3 to extract layout,
+    text, tables, and formulas. Respects concurrency limits set by MAX_PARALLEL_PREDICT.
+    """
+    pipeline = app.state.pipeline
+    semaphore = app.state.predict_sem
+    temp_dir = None
 
-    # Persist upload via streaming writes
-    temp_dir = tempfile.mkdtemp(prefix="ppsv3_")
+    # --- 1. Validation ---
+    file_extension = Path(file.filename).suffix.lower()
+    if file_extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Must be one of: {list(ALLOWED_EXTENSIONS)}"
+        )
+
+    # Read the file chunk by chunk to check size limit
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_FILE_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File size exceeds the limit of {MAX_FILE_SIZE_MB}MB."
+        )
+    
+    # --- 2. Temporary Storage & Setup ---
     try:
-        src_path = Path(temp_dir) / ("upload" + ext)
-        size = 0
-        with open(src_path, "wb") as out:
-            while True:
-                chunk = await file.read(1 << 20)  # 1 MB
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > MAX_FILE_SIZE_MB * 1024 * 1024:
-                    raise HTTPException(status_code=413, detail=f"File too large (>{MAX_FILE_SIZE_MB}MB)")
-                out.write(chunk)
-            out.flush()
-            os.fsync(out.fileno())
-        if size == 0:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        # Create a temporary directory to handle the uploaded file securely
+        temp_dir = tempfile.mkdtemp()
+        temp_file_path = Path(temp_dir) / file.filename
 
-        # Build input list: pre-render PDFs at requested DPI
-        inputs: List[str] = []
-        if ext == ".pdf":
-            import fitz
-            with fitz.open(src_path.as_posix()) as doc:
-                pages = _parse_page_range(page_range, doc.page_count)
-            out_dir = Path(temp_dir) / "pages"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            img_paths = _rasterize_pdf_pymupdf(src_path, out_dir, dpi=dpi, page_indices=pages)
-            if not img_paths:
-                return JSONResponse({"filename": file.filename, "message": "No pages selected"}, status_code=200)
-            inputs = [p.as_posix() for p in img_paths]
-        else:
-            inputs = [src_path.as_posix()]
-
-        # Predict-time kwargs (only documented/supported flags)
-        predict_kwargs = {}
-        if use_chart_recognition is not None:
-            predict_kwargs["use_chart_recognition"] = use_chart_recognition
-
-        # Run inference under semaphore + threadpool
-        with app.state.predict_sem:
+        # Write the file contents to the temporary path
+        with open(temp_file_path, "wb") as f:
+            f.write(file_bytes)
+        
+        # --- 3. Synchronous Prediction Helper ---
+        # Define a synchronous function to run in the threadpool. This function
+        # will handle the blocking semaphore acquisition and the CPU-intensive predict call.
+        def _predict_with_semaphore(
+            file_path: Path, 
+            ppstructure_pipeline: PPStructureV3, 
+            sem: threading.Semaphore, 
+            input_lang: str,
+            input_mode: str
+        ) -> List[dict]:
+            """Acquires semaphore, runs PPStructureV3 predict, and releases semaphore."""
             try:
-                # Use documented 'input' keyword
-                results = await run_in_threadpool(app.state.pipeline.predict, input=inputs, **predict_kwargs)
+                # Blocks until a slot is available based on MAX_PARALLEL_PREDICT
+                with sem:
+                    # The PPStructureV3 predict call. return_ocr_info is standard for detail.
+                    # lang and mode are passed as key runtime parameters.
+                    results = ppstructure_pipeline.predict(
+                        str(file_path),
+                        lang=input_lang,
+                        mode=input_mode,
+                        return_ocr_info=True
+                    )
+                    return results
             except Exception as e:
-                raise HTTPException(status_code=500, detail=f"OCR failed: {e}")
+                # Log or handle prediction-specific errors here
+                print(f"Prediction error: {e}")
+                # Re-raise the exception to be caught by run_in_threadpool wrapper
+                raise
 
-        if not isinstance(results, (list, tuple)):
-            results = [results]
+        # --- 4. Execution in Threadpool ---
+        # Run the synchronous helper function in the threadpool to prevent blocking the event loop
+        prediction_results = await run_in_threadpool(
+            _predict_with_semaphore,
+            temp_file_path,
+            pipeline,
+            semaphore,
+            lang,
+            mode
+        )
 
-        # Markdown path: canonical concatenation with fallbacks
-        if output_format == "markdown":
-            markdown_list = []
-            for res in results:
-                md = getattr(res, "markdown", None)
-                if md is None:
-                    md = {"text": str(getattr(res, "text", "")), "markdown_images": {}}
-                markdown_list.append(md)
+        # --- 5. Response ---
+        # PPStructureV3 returns a list of dictionaries (one per page/element)
+        return JSONResponse(content=prediction_results)
 
-            concatenated_md = ""
-            try:
-                concatenated_md = app.state.pipeline.concatenate_markdown_pages(markdown_list)
-            except AttributeError:
-                try:
-                    concatenated_md = app.state.pipeline.paddlex_pipeline.concatenate_markdown_pages(markdown_list)
-                except Exception:
-                    concatenated_md = "\n\n---\n\n".join([md.get("text", "") for md in markdown_list])
-
-            return PlainTextResponse(concatenated_md, media_type="text/markdown")
-
-        # JSON path: serialize via save_to_json for version compatibility
-        tmp_json_dir = Path(temp_dir) / "json"
-        tmp_json_dir.mkdir(parents=True, exist_ok=True)
-        pages_out = []
-        for idx, res in enumerate(results, start=1):
-            before = set(tmp_json_dir.glob("*.json"))
-            res.save_to_json(save_path=tmp_json_dir.as_posix())
-            after = set(tmp_json_dir.glob("*.json"))
-            new_files = sorted(list(after - before))
-            data = None
-            if new_files:
-                latest = new_files[-1]
-                data = json.loads(latest.read_text(encoding="utf-8"))
-            else:
-                data = {"result": str(getattr(res, "text", ""))}
-            pages_out.append({"index": idx, "data": data})
-
-        return JSONResponse({"filename": file.filename, "pages": pages_out})
-
+    except HTTPException as e:
+        # Re-raise explicit HTTP exceptions
+        raise e
+    except Exception as e:
+        # Catch any other unexpected errors during file I/O or prediction
+        print(f"An unexpected error occurred: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error during processing: {e}")
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-if __name__ == "__main__":
-    # Run with: uvicorn fastapi_app:app --host 0.0.0.0 --port 8000
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        # --- 6. Cleanup ---
+        # Ensure the temporary directory and all its contents are removed
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as e:
+                # Log cleanup errors but don't fail the request
+                print(f"Warning: Failed to clean up temporary directory {temp_dir}: {e}")
