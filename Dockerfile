@@ -1,20 +1,26 @@
 FROM python:3.13-slim
 
-# Noninteractive apt to avoid debconf warnings
 ENV DEBIAN_FRONTEND=noninteractive \
     DEBCONF_NONINTERACTIVE_SEEN=true \
-    DEBCONF_NOWARNINGS=yes
+    DEBCONF_NOWARNINGS=yes \
+    PIP_NO_CACHE_DIR=1
 
-# Latest GL/GUI libs commonly required by CV backends used by PaddleOCR
+# Minimal system libs for common CV backends
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 wget && \
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 wget ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Latest pip + Paddle CPU wheel from official CPU index (Armv8/aarch64 supported),
-# plus PaddleOCR (doc-parser), FastAPI, Uvicorn, and python-multipart
-RUN python -m pip install --no-cache-dir -U pip --root-user-action=ignore \
- && python -m pip install --no-cache-dir paddlepaddle -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/ --root-user-action=ignore \
- && python -m pip install --no-cache-dir "paddleocr[all]" fastapi uvicorn[standard] python-multipart --root-user-action=ignore
+# Core Python deps: Paddle (CPU), PaddleOCR, FastAPI stack, and PyMuPDF (import fitz)
+# Note: PyMuPDF provides wheels for Py3.9–3.13; no external deps when wheel is available
+RUN python -m pip install -U pip --root-user-action=ignore && \
+    python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/ --root-user-action=ignore && \
+    python -m pip install "paddleocr[all]" fastapi uvicorn[standard] python-multipart --root-user-action=ignore && \
+    python -m pip install "pymupdf" --root-user-action=ignore
+
+# If your platform lacks a PyMuPDF wheel (rare), uncomment the fallback below:
+# RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config \
+#     libjpeg-dev zlib1g-dev && rm -rf /var/lib/apt/lists/* && \
+#     PYMUPDF_SETUP_PY_LIMITED_API=0 python -m pip install --no-binary=pymupdf pymupdf --root-user-action=ignore
 
 WORKDIR /app
 COPY app /app/app
