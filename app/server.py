@@ -97,101 +97,143 @@ def health():
 
 @app.post("/parse")
 async def parse(
-    file: UploadFile = File(..., description="The document image or PDF file to process."),
-    lang: Literal["en", "ch", "ch_tra", "ko", "ja"] = Query("en", description="Language of the text in the document."),
-    mode: Literal["structure", "html", "markdown"] = Query("structure", description="Output format for table and formula results.")
+    file: UploadFile = File(...),
+    output_format: Literal["json", "markdown", "excel"] = Query("json", description="Output format for the structured result"),
+    lang: Optional[str] = Query("en", description="Language for OCR (e.g., 'en', 'ch', 'fr')"),
+    recovery: bool = Query(False, description="Enable recovery mode for distorted documents"),
+    save_folder: Optional[str] = Query(None, description="Optional folder to save intermediate results like images or tables")
 ):
-    """
-    Analyzes an uploaded document (image or PDF) using PPStructureV3 to extract layout,
-    text, tables, and formulas. Respects concurrency limits set by MAX_PARALLEL_PREDICT.
-    """
-    pipeline = app.state.pipeline
-    semaphore = app.state.predict_sem
-    temp_dir = None
-
-    # --- 1. Validation ---
-    file_extension = Path(file.filename).suffix.lower()
-    if file_extension not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type. Must be one of: {list(ALLOWED_EXTENSIONS)}"
-        )
-
-    # Read the file chunk by chunk to check size limit
-    file_bytes = await file.read()
-    if len(file_bytes) > MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File size exceeds the limit of {MAX_FILE_SIZE_MB}MB."
-        )
+    # Validate file extension
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file extension: {file_ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
     
-    # --- 2. Temporary Storage & Setup ---
+    # Validate file size (approximate check via content length if available, otherwise read in chunks)
+    content_length = file.headers.get("content-length")
+    if content_length and int(content_length) > MAX_FILE_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"File size exceeds {MAX_FILE_SIZE_MB} MB limit")
+    
+    # Read file contents
+    contents = await file.read()
+    if len(contents) > MAX_FILE_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"File size exceeds {MAX_FILE_SIZE_MB} MB limit")
+    
+    # Acquire semaphore for parallel prediction control
+    if not app.state.predict_sem.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="Server busy: Maximum parallel predictions reached")
+    
     try:
-        # Create a temporary directory to handle the uploaded file securely
-        temp_dir = tempfile.mkdtemp()
-        temp_file_path = Path(temp_dir) / file.filename
-
-        # Write the file contents to the temporary path
-        with open(temp_file_path, "wb") as f:
-            f.write(file_bytes)
+        # Create temporary file for input
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_input:
+            tmp_input.write(contents)
+            tmp_input_path = tmp_input.name
         
-        # --- 3. Synchronous Prediction Helper ---
-        # Define a synchronous function to run in the threadpool. This function
-        # will handle the blocking semaphore acquisition and the CPU-intensive predict call.
-        def _predict_with_semaphore(
-            file_path: Path, 
-            ppstructure_pipeline: PPStructureV3, 
-            sem: threading.Semaphore, 
-            input_lang: str,
-            input_mode: str
-        ) -> List[dict]:
-            """Acquires semaphore, runs PPStructureV3 predict, and releases semaphore."""
-            try:
-                # Blocks until a slot is available based on MAX_PARALLEL_PREDICT
-                with sem:
-                    # The PPStructureV3 predict call. return_ocr_info is standard for detail.
-                    # lang and mode are passed as key runtime parameters.
-                    results = ppstructure_pipeline.predict(
-                        str(file_path),
-                        lang=input_lang,
-                        mode=input_mode,
-                        return_ocr_info=True
-                    )
-                    return results
-            except Exception as e:
-                # Log or handle prediction-specific errors here
-                print(f"Prediction error: {e}")
-                # Re-raise the exception to be caught by run_in_threadpool wrapper
-                raise
-
-        # --- 4. Execution in Threadpool ---
-        # Run the synchronous helper function in the threadpool to prevent blocking the event loop
-        prediction_results = await run_in_threadpool(
-            _predict_with_semaphore,
-            temp_file_path,
-            pipeline,
-            semaphore,
-            lang,
-            mode
+        # Prepare save folder if specified
+        temp_save_dir = None
+        if save_folder:
+            temp_save_dir = tempfile.mkdtemp(dir=save_folder)
+        else:
+            temp_save_dir = tempfile.mkdtemp()
+        
+        # Dynamically override language if not English (PPStructureV3 supports lang parameter)
+        pipeline_kwargs = {}
+        if lang != "en":
+            pipeline_kwargs["lang"] = lang
+        
+        # Run prediction in threadpool to avoid blocking the event loop
+        result = await run_in_threadpool(
+            app.state.pipeline,
+            img=tmp_input_path,
+            recovery=recovery,
+            save_path=temp_save_dir,
+            **pipeline_kwargs
         )
-
-        # --- 5. Response ---
-        # PPStructureV3 returns a list of dictionaries (one per page/element)
-        return JSONResponse(content=prediction_results)
-
-    except HTTPException as e:
-        # Re-raise explicit HTTP exceptions
-        raise e
+        
+        # Process result based on output format
+        if output_format == "json":
+            # PPStructureV3 returns a list of dicts; serialize directly
+            output_data = json.dumps(result, ensure_ascii=False, indent=2)
+            response = PlainTextResponse(content=output_data, media_type="application/json")
+        elif output_format == "markdown":
+            # Convert structure to markdown (custom logic for text, tables, etc.)
+            md_content = convert_to_markdown(result)
+            response = PlainTextResponse(content=md_content, media_type="text/markdown")
+        elif output_format == "excel" and result_has_tables(result):
+            # Save tables to Excel if present
+            excel_path = os.path.join(temp_save_dir, "output.xlsx")
+            save_to_excel(result, excel_path)
+            response = JSONResponse(content={"message": "Excel generated", "excel_path": excel_path})
+        else:
+            response = JSONResponse(content=result)
+        
+        return response
+    
     except Exception as e:
-        # Catch any other unexpected errors during file I/O or prediction
-        print(f"An unexpected error occurred: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error during processing: {e}")
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+    
     finally:
-        # --- 6. Cleanup ---
-        # Ensure the temporary directory and all its contents are removed
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                shutil.rmtree(temp_dir)
-            except Exception as e:
-                # Log cleanup errors but don't fail the request
-                print(f"Warning: Failed to clean up temporary directory {temp_dir}: {e}")
+        # Cleanup
+        app.state.predict_sem.release()
+        os.unlink(tmp_input_path)
+        if not save_folder and temp_save_dir:
+            shutil.rmtree(temp_save_dir, ignore_errors=True)
+
+def result_has_tables(result):
+    """Check if result contains table elements."""
+    return any(block.get("type") == "table" for page in result for block in page)
+
+def convert_to_markdown(result: List[dict]) -> str:
+    """Convert PPStructureV3 result to Markdown format."""
+    md_lines = []
+    for page in result:
+        for block in page:
+            block_type = block.get("type", "text")
+            if block_type == "text":
+                md_lines.append(block.get("text", ""))
+            elif block_type == "title":
+                md_lines.append(f"# {block.get('text', '')}")
+            elif block_type == "table":
+                # Convert table html to markdown table
+                html = block.get("res_html", "")
+                md_lines.append(html_to_markdown_table(html))
+            elif block_type == "figure":
+                md_lines.append(f"![Figure]({block.get('img_path', '')})")
+            md_lines.append("\n")
+    return "\n".join(md_lines)
+
+def html_to_markdown_table(html: str) -> str:
+    """Simple HTML table to Markdown conversion."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table")
+    if not table:
+        return ""
+    
+    md = []
+    rows = table.find_all("tr")
+    for i, row in enumerate(rows):
+        cols = row.find_all(["td", "th"])
+        cols_text = [col.get_text(strip=True) for col in cols]
+        md.append("| " + " | ".join(cols_text) + " |")
+        if i == 0:
+            md.append("| " + " | ".join(["---"] * len(cols)) + " |")
+    return "\n".join(md)
+
+def save_to_excel(result: List[dict], excel_path: str):
+    """Save tables from result to Excel using pandas/openpyxl."""
+    import pandas as pd
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        table_idx = 1
+        for page_idx, page in enumerate(result):
+            for block_idx, block in enumerate(page):
+                if block.get("type") == "table":
+                    html = block.get("res_html", "")
+                    df = html_table_to_dataframe(html)
+                    df.to_excel(writer, sheet_name=f"Page{page_idx+1}_Table{table_idx}", index=False)
+                    table_idx += 1
+
+def html_table_to_dataframe(html: str) -> pd.DataFrame:
+    """Convert HTML table to pandas DataFrame."""
+    import pandas as pd
+    from io import StringIO
+    return pd.read_html(StringIO(html))[0]
