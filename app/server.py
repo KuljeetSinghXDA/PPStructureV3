@@ -1,15 +1,18 @@
 import os
+import uuid
 import tempfile
 import threading
 import json
 import shutil
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Optional
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
 
+# Runtime toggles
 ENABLE_HPI = False
 ENABLE_MKLDNN = True
 
@@ -29,7 +32,7 @@ USE_TABLE_RECOGNITION = True
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 
-# Model overrides
+# Model overrides (names from PaddleOCR model zoo; can be left as None to use defaults)
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
@@ -39,7 +42,7 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters
+# Detection/recognition parameters (use None for defaults per docs)
 LAYOUT_THRESHOLD = None
 TEXT_DET_THRESH = None
 TEXT_DET_BOX_THRESH = None
@@ -49,15 +52,70 @@ TEXT_DET_LIMIT_TYPE = None
 TEXT_REC_SCORE_THRESH = None
 TEXT_RECOGNITION_BATCH_SIZE = None
 
-
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
 
+# Output root
+OUTPUT_ROOT = Path("outputs")
+OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+
+def _ext_ok(filename: str) -> bool:
+    return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
+
+def _bytes_to_mb(n: int) -> float:
+    return n / (1024 * 1024)
+
+def _safe_write_upload(tmp_dir: Path, up: UploadFile) -> Path:
+    # Read in-memory (50MB cap default)
+    content = up.file.read()
+    size_mb = _bytes_to_mb(len(content))
+    if size_mb > MAX_FILE_SIZE_MB:
+        raise HTTPException(status_code=413, detail=f"File too large: {size_mb:.2f} MB > {MAX_FILE_SIZE_MB} MB")
+    # Persist to disk
+    in_path = tmp_dir / up.filename
+    with open(in_path, "wb") as f:
+        f.write(content)
+    return in_path
+
+def _collect_artifacts(out_dir: Path) -> dict:
+    json_files = sorted([str(p) for p in out_dir.glob("*.json")])
+    md_files = sorted([str(p) for p in out_dir.glob("*.md")])
+    pages = []
+    for jf in json_files:
+        try:
+            with open(jf, "r", encoding="utf-8") as f:
+                pages.append(json.load(f))
+        except Exception:
+            # Keep going; still return manifest
+            continue
+    combined_markdown = ""
+    for mf in md_files:
+        try:
+            with open(mf, "r", encoding="utf-8") as f:
+                combined_markdown += f.read().rstrip() + "\n\n"
+        except Exception:
+            continue
+    return {
+        "pages": pages,
+        "json_files": json_files,
+        "markdown_files": md_files,
+        "markdown_combined": combined_markdown.strip()
+    }
+
+def _run_predict_and_save(pipeline: PPStructureV3, input_path: Path, save_dir: Path):
+    # Predict using pipeline; save page-wise JSON and Markdown via result helpers
+    outputs = pipeline.predict(str(input_path))
+    for res in outputs:
+        # Official helpers to persist results
+        res.save_to_json(save_path=str(save_dir))
+        res.save_to_markdown(save_path=str(save_dir))
+
 # ================= App & Lifespan =================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize PP-StructureV3 with documented flags/parameters
     app.state.pipeline = PPStructureV3(
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
@@ -88,6 +146,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
     yield
+    # No explicit teardown required; FastAPI will clean app.state on shutdown
 
 app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
 
@@ -96,94 +155,58 @@ def health():
     return {"status": "ok"}
 
 @app.post("/parse")
-async def parse_document(
-    file: UploadFile = File(..., description="Document file to parse (PDF, JPG, PNG, etc.)"),
+async def parse(
+    file: UploadFile = File(...),
+    save_as_job: Optional[bool] = Query(True, description="Persist results under outputs/<job_id>"),
 ):
-    # Validate file extension
-    filename_lower = file.filename.lower()
-    if not any(filename_lower.endswith(ext) for ext in ALLOWED_EXTENSIONS):
-        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {ALLOWED_EXTENSIONS}")
+    if not _ext_ok(file.filename):
+        raise HTTPException(status_code=400, detail=f"Unsupported file type; allowed: {sorted(ALLOWED_EXTENSIONS)}")
 
-    # Validate file size
-    contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise HTTPException(status_code=400, detail=f"File size exceeds {MAX_FILE_SIZE_MB} MB limit")
-
-    # Save uploaded file to temporary location
-    suffix = Path(file.filename).suffix
-    input_path = None
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
-        tmp_file.write(contents)
-        input_path = tmp_file.name
-
-    if not input_path:
-        raise HTTPException(status_code=500, detail="Failed to create temporary file")
+    # Prevent concurrent runs beyond limit
+    if not app.state.predict_sem.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="Too many concurrent requests; please retry later")
 
     try:
-        # Acquire semaphore for concurrency control
-        if not app.state.predict_sem.acquire(blocking=True, timeout=60):
-            raise HTTPException(status_code=503, detail="Service is busy. Please try again later.")
+        job_id = str(uuid.uuid4())
+        with tempfile.TemporaryDirectory(prefix="ppsv3_") as tmpdir_str:
+            tmpdir = Path(tmpdir_str)
+            input_path = _safe_write_upload(tmpdir, file)
 
-        try:
-            # Run prediction in threadpool to avoid blocking the event loop
-            def run_predict():
-                return app.state.pipeline.predict(input=input_path)
+            # Output directory (temp first, then move if requested)
+            temp_out_dir = tmpdir / "out"
+            temp_out_dir.mkdir(parents=True, exist_ok=True)
 
-            output = await run_in_threadpool(run_predict)
-        finally:
-            app.state.predict_sem.release()
+            # Run predict in threadpool to avoid blocking event loop
+            await run_in_threadpool(
+                _run_predict_and_save,
+                app.state.pipeline,
+                input_path,
+                temp_out_dir
+            )
 
-        if not output:
-            raise HTTPException(status_code=404, detail="No parsing results generated")
+            # Finalize output location
+            if save_as_job:
+                final_dir = OUTPUT_ROOT / job_id
+                final_dir.mkdir(parents=True, exist_ok=True)
+                for p in temp_out_dir.iterdir():
+                    shutil.move(str(p), str(final_dir / p.name))
+                out_dir = final_dir
+            else:
+                out_dir = temp_out_dir
 
-        # Process results to generate JSON and Markdown contents
-        with tempfile.TemporaryDirectory() as temp_dir:
-            page_jsons = []
-            page_mds = []
+            artifacts = _collect_artifacts(out_dir)
 
-            for idx, res in enumerate(output):
-                # Save JSON and MD for this page
-                json_save_path = os.path.join(temp_dir, f"page_{idx}")
-                md_save_path = os.path.join(temp_dir, f"page_{idx}")
-
-                res.save_to_json(save_path=json_save_path)
-                res.save_to_markdown(save_path=md_save_path)
-
-                # Read the saved files (assuming .json and .md extensions are appended)
-                json_file = f"{json_save_path}.json"
-                md_file = f"{md_save_path}.md"
-
-                if os.path.exists(json_file):
-                    with open(json_file, "r", encoding="utf-8") as f:
-                        page_jsons.append(json.load(f))
-                else:
-                    page_jsons.append({})
-
-                if os.path.exists(md_file):
-                    with open(md_file, "r", encoding="utf-8") as f:
-                        page_mds.append(f.read())
-                else:
-                    page_mds.append("")
-
-            # Compile full JSON (list of pages)
-            full_json = {"pages": page_jsons}
-
-            # Compile full Markdown (concatenated pages)
-            full_md = "\n\n".join([f"# Page {i+1}\n\n{md}" for i, md in enumerate(page_mds)])
-
-        # Return structured response
-        return {
-            "json": full_json,
-            "markdown": full_md,
-            "num_pages": len(output),
-            "message": "Document parsed successfully"
-        }
-
+            return JSONResponse(
+                content={
+                    "job_id": job_id if save_as_job else None,
+                    "input_filename": file.filename,
+                    "output_dir": str(out_dir),
+                    "artifacts": artifacts,
+                }
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
     finally:
-        # Clean up temporary input file
-        if input_path and os.path.exists(input_path):
-            os.unlink(input_path)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        app.state.predict_sem.release()
