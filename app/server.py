@@ -30,14 +30,6 @@ USE_CHART_RECOGNITION = False
 USE_SEAL_RECOGNITION = False
 USE_REGION_DETECTION = True
 
-# Advanced table behavior toggles (additions)
-USE_OCR_RESULTS_WITH_TABLE_CELLS = True
-USE_E2E_WIRED_TABLE_REC_MODEL = False
-USE_E2E_WIRELESS_TABLE_REC_MODEL = False
-USE_WIRED_TABLE_CELLS_TRANS_TO_HTML = False
-USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML = False
-USE_TABLE_ORIENTATION_CLASSIFY = True
-
 # Model overrides
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
@@ -53,7 +45,7 @@ SEAL_TEXT_DETECTION_MODEL_NAME = None
 SEAL_TEXT_RECOGNITION_MODEL_NAME = None
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Optional model directories (local checkpoints)
+# Optional model directories
 LAYOUT_DETECTION_MODEL_DIR = None
 REGION_DETECTION_MODEL_DIR = None
 TEXT_DETECTION_MODEL_DIR = None
@@ -129,7 +121,6 @@ def _make_pipeline(**kwargs) -> PPStructureV3:
     return PPStructureV3(**kwargs)
 
 def _collect_result_json_and_markdown(pipeline: PPStructureV3, outputs):
-    # Use documented attributes to extract per-page results and optional page-level markdown
     page_json = []
     markdown_list = []
     for res in outputs:
@@ -141,7 +132,6 @@ def _collect_result_json_and_markdown(pipeline: PPStructureV3, outputs):
         try:
             merged_md = pipeline.concatenate_markdown_pages(markdown_list)
         except Exception:
-            # Temporary fallback for older builds or environments
             try:
                 merged_md = getattr(getattr(pipeline, "paddlex_pipeline", None), "concatenate_markdown_pages")(markdown_list)  # type: ignore
             except Exception:
@@ -236,24 +226,40 @@ async def lifespan(app: FastAPI):
         use_chart_recognition=USE_CHART_RECOGNITION,
         use_seal_recognition=USE_SEAL_RECOGNITION,
         use_region_detection=USE_REGION_DETECTION,
-
-        # Advanced table behavior toggles
-        use_ocr_results_with_table_cells=USE_OCR_RESULTS_WITH_TABLE_CELLS,
-        use_e2e_wired_table_rec_model=USE_E2E_WIRED_TABLE_REC_MODEL,
-        use_e2e_wireless_table_rec_model=USE_E2E_WIRELESS_TABLE_REC_MODEL,
-        use_wired_table_cells_trans_to_html=USE_WIRED_TABLE_CELLS_TRANS_TO_HTML,
-        use_wireless_table_cells_trans_to_html=USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML,
-        use_table_orientation_classify=USE_TABLE_ORIENTATION_CLASSIFY,
     )
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
     app.state.pipeline_cache = OrderedDict()
     yield
 
-app = FastAPI(title="PPStructureV3 /parse API", version="1.4.0", lifespan=lifespan)
+app = FastAPI(title="PPStructureV3 /parse API", version="1.5.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+def _build_predict_kwargs(
+    use_ocr_results_with_table_cells: Optional[bool],
+    use_e2e_wired_table_rec_model: Optional[bool],
+    use_e2e_wireless_table_rec_model: Optional[bool],
+    use_wired_table_cells_trans_to_html: Optional[bool],
+    use_wireless_table_cells_trans_to_html: Optional[bool],
+    use_table_orientation_classify: Optional[bool],
+) -> Dict[str, Any]:
+    # Only include keys explicitly provided
+    kwargs: Dict[str, Any] = {}
+    if use_ocr_results_with_table_cells is not None:
+        kwargs["use_ocr_results_with_table_cells"] = use_ocr_results_with_table_cells
+    if use_e2e_wired_table_rec_model is not None:
+        kwargs["use_e2e_wired_table_rec_model"] = use_e2e_wired_table_rec_model
+    if use_e2e_wireless_table_rec_model is not None:
+        kwargs["use_e2e_wireless_table_rec_model"] = use_e2e_wireless_table_rec_model
+    if use_wired_table_cells_trans_to_html is not None:
+        kwargs["use_wired_table_cells_trans_to_html"] = use_wired_table_cells_trans_to_html
+    if use_wireless_table_cells_trans_to_html is not None:
+        kwargs["use_wireless_table_cells_trans_to_html"] = use_wireless_table_cells_trans_to_html
+    if use_table_orientation_classify is not None:
+        kwargs["use_table_orientation_classify"] = use_table_orientation_classify
+    return kwargs
 
 def _effective_params_from_query(
     # Device/backend
@@ -266,14 +272,6 @@ def _effective_params_from_query(
     use_textline_orientation: Optional[bool], use_table_recognition: Optional[bool],
     use_formula_recognition: Optional[bool], use_chart_recognition: Optional[bool],
     use_seal_recognition: Optional[bool], use_region_detection: Optional[bool],
-
-    # Advanced table behavior toggles
-    use_ocr_results_with_table_cells: Optional[bool],
-    use_e2e_wired_table_rec_model: Optional[bool],
-    use_e2e_wireless_table_rec_model: Optional[bool],
-    use_wired_table_cells_trans_to_html: Optional[bool],
-    use_wireless_table_cells_trans_to_html: Optional[bool],
-    use_table_orientation_classify: Optional[bool],
 
     # Models and dirs
     layout_detection_model_name: Optional[str], layout_detection_model_dir: Optional[str],
@@ -306,7 +304,7 @@ def _effective_params_from_query(
     seal_det_limit_side_len: Optional[int], seal_det_limit_type: Optional[str],
     seal_det_thresh: Optional[float], seal_det_box_thresh: Optional[float], seal_det_unclip_ratio: Optional[float],
 ) -> Dict[str, Any]:
-    p = {}
+    p: Dict[str, Any] = {}
 
     # Backend
     if device is not None: p["device"] = device
@@ -328,16 +326,8 @@ def _effective_params_from_query(
     if use_seal_recognition is not None: p["use_seal_recognition"] = use_seal_recognition
     if use_region_detection is not None: p["use_region_detection"] = use_region_detection
 
-    # Advanced table behavior toggles
-    if use_ocr_results_with_table_cells is not None: p["use_ocr_results_with_table_cells"] = use_ocr_results_with_table_cells
-    if use_e2e_wired_table_rec_model is not None: p["use_e2e_wired_table_rec_model"] = use_e2e_wired_table_rec_model
-    if use_e2e_wireless_table_rec_model is not None: p["use_e2e_wireless_table_rec_model"] = use_e2e_wireless_table_rec_model
-    if use_wired_table_cells_trans_to_html is not None: p["use_wired_table_cells_trans_to_html"] = use_wired_table_cells_trans_to_html
-    if use_wireless_table_cells_trans_to_html is not None: p["use_wireless_table_cells_trans_to_html"] = use_wireless_table_cells_trans_to_html
-    if use_table_orientation_classify is not None: p["use_table_orientation_classify"] = use_table_orientation_classify
-
-    # Model names and dirs
-    kvs = [
+    # Model names/dirs
+    for k, v in [
         ("layout_detection_model_name", layout_detection_model_name),
         ("layout_detection_model_dir", layout_detection_model_dir),
         ("region_detection_model_name", region_detection_model_name),
@@ -372,13 +362,12 @@ def _effective_params_from_query(
         ("seal_text_detection_model_dir", seal_text_detection_model_dir),
         ("seal_text_recognition_model_name", seal_text_recognition_model_name),
         ("seal_text_recognition_model_dir", seal_text_recognition_model_dir),
-    ]
-    for k, v in kvs:
+    ]:
         if v is not None:
             p[k] = v
 
     # Thresholds / batch sizes
-    kvp = [
+    for k, v in [
         ("layout_threshold", layout_threshold),
         ("layout_nms", layout_nms),
         ("layout_unclip_ratio", layout_unclip_ratio),
@@ -400,15 +389,13 @@ def _effective_params_from_query(
         ("seal_det_thresh", seal_det_thresh),
         ("seal_det_box_thresh", seal_det_box_thresh),
         ("seal_det_unclip_ratio", seal_det_unclip_ratio),
-    ]
-    for k, v in kvp:
+    ]:
         if v is not None:
             p[k] = v
 
     return p
 
 def _get_or_create_pipeline(app: FastAPI, effective: Dict[str, Any]) -> PPStructureV3:
-    # If no overrides, reuse default
     if not effective:
         return app.state.pipeline
 
@@ -419,7 +406,6 @@ def _get_or_create_pipeline(app: FastAPI, effective: Dict[str, Any]) -> PPStruct
         cache[eff_key] = pipe
         return pipe
 
-    # Evict if needed
     while len(cache) >= PIPELINE_CACHE_SIZE:
         cache.popitem(last=False)
 
@@ -457,12 +443,6 @@ def _get_or_create_pipeline(app: FastAPI, effective: Dict[str, Any]) -> PPStruct
         use_chart_recognition=USE_CHART_RECOGNITION,
         use_seal_recognition=USE_SEAL_RECOGNITION,
         use_region_detection=USE_REGION_DETECTION,
-        use_ocr_results_with_table_cells=USE_OCR_RESULTS_WITH_TABLE_CELLS,
-        use_e2e_wired_table_rec_model=USE_E2E_WIRED_TABLE_REC_MODEL,
-        use_e2e_wireless_table_rec_model=USE_E2E_WIRELESS_TABLE_REC_MODEL,
-        use_wired_table_cells_trans_to_html=USE_WIRED_TABLE_CELLS_TRANS_TO_HTML,
-        use_wireless_table_cells_trans_to_html=USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML,
-        use_table_orientation_classify=USE_TABLE_ORIENTATION_CLASSIFY,
     )
     base_defaults.update(effective)
     final_params = {k: v for k, v in base_defaults.items() if v is not None}
@@ -495,7 +475,7 @@ async def parse(
     use_seal_recognition: Optional[bool] = Query(None),
     use_region_detection: Optional[bool] = Query(None),
 
-    # Advanced table behavior toggles
+    # Advanced table behavior toggles (predict-time)
     use_ocr_results_with_table_cells: Optional[bool] = Query(None),
     use_e2e_wired_table_rec_model: Optional[bool] = Query(None),
     use_e2e_wireless_table_rec_model: Optional[bool] = Query(None),
@@ -570,20 +550,18 @@ async def parse(
     if not _ext_ok(file.filename):
         raise HTTPException(status_code=400, detail=f"Unsupported file type; allowed: {sorted(ALLOWED_EXTENSIONS)}")
 
-    # Persist to disk
+    # Save to disk
     tmp_dir = tempfile.mkdtemp(prefix="ppsv3_")
     tmp_path = os.path.join(tmp_dir, file.filename)
     try:
         with open(tmp_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
-        # Build effective overrides
+        # Build constructor overrides
         effective = _effective_params_from_query(
             device, enable_mkldnn, enable_hpi, use_tensorrt, precision, mkldnn_cache_capacity, cpu_threads, paddlex_config,
             use_doc_orientation_classify, use_doc_unwarping, use_textline_orientation,
             use_table_recognition, use_formula_recognition, use_chart_recognition, use_seal_recognition, use_region_detection,
-            use_ocr_results_with_table_cells, use_e2e_wired_table_rec_model, use_e2e_wireless_table_rec_model,
-            use_wired_table_cells_trans_to_html, use_wireless_table_cells_trans_to_html, use_table_orientation_classify,
             layout_detection_model_name, layout_detection_model_dir,
             region_detection_model_name, region_detection_model_dir,
             text_detection_model_name, text_detection_model_dir,
@@ -611,12 +589,22 @@ async def parse(
         # Choose pipeline
         pipeline = _get_or_create_pipeline(app, effective)
 
-        # Concurrency guard
+        # Build predict-time kwargs for advanced table behavior
+        predict_kwargs = _build_predict_kwargs(
+            use_ocr_results_with_table_cells,
+            use_e2e_wired_table_rec_model,
+            use_e2e_wireless_table_rec_model,
+            use_wired_table_cells_trans_to_html,
+            use_wireless_table_cells_trans_to_html,
+            use_table_orientation_classify,
+        )
+
+        # Concurrency guard and inference
         acquired = app.state.predict_sem.acquire(timeout=600)
         if not acquired:
             raise HTTPException(status_code=503, detail="Server busy")
         try:
-            outputs = await run_in_threadpool(lambda: pipeline.predict(input=tmp_path))
+            outputs = await run_in_threadpool(lambda: pipeline.predict(input=tmp_path, **predict_kwargs))
         finally:
             app.state.predict_sem.release()
 
