@@ -66,34 +66,34 @@ SEAL_TEXT_DETECTION_MODEL_DIR = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
 CHART_RECOGNITION_MODEL_DIR = None
 
-# Layout thresholds and merging
-LAYOUT_THRESHOLD = 0.40  # keep more marginal layout regions
-LAYOUT_NMS = True         # suppress overlapping layout boxes
-LAYOUT_UNCLIP_RATIO = 1.2 # slightly expand detected layout boxes
-LAYOUT_MERGE_BBOXES_MODE = "large"  # keep outer box for overlapping regions
+# Thresholds / sizes / batches (favor recall; filter low-confidence rec)
+LAYOUT_THRESHOLD = None
+LAYOUT_NMS = None
+LAYOUT_UNCLIP_RATIO = None
+LAYOUT_MERGE_BBOXES_MODE = None
 
-# Text detection tuning
-TEXT_DET_THRESH = 0.25       # increase recall for faint/small characters
-TEXT_DET_BOX_THRESH = 0.50   # allow weaker boxes through for recognition
-TEXT_DET_UNCLIP_RATIO = 1.8  # close gaps in low-contrast strokes
-TEXT_DET_LIMIT_SIDE_LEN = 1536  # upsample fine text moderately
-TEXT_DET_LIMIT_TYPE = "max"  # clamp longest side
+# Text detection tuning for small fonts typical in lab reports
+TEXT_DET_THRESH = None
+TEXT_DET_BOX_THRESH = None
+TEXT_DET_UNCLIP_RATIO = None
+TEXT_DET_LIMIT_SIDE_LEN = None
+TEXT_DET_LIMIT_TYPE = None
 
-# Seals (unused; keep defaults)
-SEAL_DET_LIMIT_SIDE_LEN = 736
-SEAL_DET_LIMIT_TYPE = "min"
-SEAL_DET_THRESH = 0.20
-SEAL_DET_BOX_THRESH = 0.60
-SEAL_DET_UNCLIP_RATIO = 0.50
-SEAL_REC_SCORE_THRESH = 0.00
+# Seals (unused)
+SEAL_DET_LIMIT_SIDE_LEN = None
+SEAL_DET_LIMIT_TYPE = None
+SEAL_DET_THRESH = None
+SEAL_DET_BOX_THRESH = None
+SEAL_DET_UNCLIP_RATIO = None
+SEAL_REC_SCORE_THRESH = None
 
-# Text recognition filtering and batch sizes
-TEXT_REC_SCORE_THRESH = 0.85
-TEXT_RECOGNITION_BATCH_SIZE = 8
-TEXTLINE_ORIENTATION_BATCH_SIZE = 8
-FORMULA_RECOGNITION_BATCH_SIZE = 1
-CHART_RECOGNITION_BATCH_SIZE = 1
-SEAL_TEXT_RECOGNITION_BATCH_SIZE = 1
+# Text recognition score filter to improve reliability
+TEXT_REC_SCORE_THRESH = None
+TEXT_RECOGNITION_BATCH_SIZE = None
+TEXTLINE_ORIENTATION_BATCH_SIZE = None
+FORMULA_RECOGNITION_BATCH_SIZE = None
+CHART_RECOGNITION_BATCH_SIZE = None
+SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 
 # Backend knobs (ARM64 optimized)
 ENABLE_HPI = False                        # HPI not supported on ARM64
