@@ -3,6 +3,7 @@ import json
 import shutil
 import tempfile
 import threading
+import platform
 from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Literal, Dict, Any, Tuple
@@ -15,7 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from paddleocr import PPStructureV3
 
 # ================= Core Configuration (Pinned Values) =================
-DEVICE = "cpu"
+DEVICE = "cpu"  # keep explicit; avoids device auto-detection pitfalls
 CPU_THREADS = 4
 
 # Optional accuracy boosters
@@ -91,8 +92,11 @@ CHART_RECOGNITION_BATCH_SIZE = None
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 
 # Inference/backend knobs
+# HPI is x86-64 only per docs; keep disabled for ARM64 nightlies
 ENABLE_HPI = False
-ENABLE_MKLDNN = True
+# Prefer disabling MKLDNN on ARM64; it is x86-focused and ignored if unavailable
+_ENABLE_MKLDNN_DEFAULT = platform.machine().lower() in ("x86_64", "amd64")
+ENABLE_MKLDNN = bool(int(os.getenv("ENABLE_MKLDNN", "1" if _ENABLE_MKLDNN_DEFAULT else "0")))
 USE_TENSORRT = False
 PRECISION = "fp32"
 MKLDNN_CACHE_CAPACITY = 10
@@ -231,7 +235,7 @@ async def lifespan(app: FastAPI):
     app.state.pipeline_cache = OrderedDict()
     yield
 
-app = FastAPI(title="PPStructureV3 /parse API", version="1.5.0", lifespan=lifespan)
+app = FastAPI(title="PPStructureV3 /parse API", version="1.6.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
@@ -245,7 +249,6 @@ def _build_predict_kwargs(
     use_wireless_table_cells_trans_to_html: Optional[bool],
     use_table_orientation_classify: Optional[bool],
 ) -> Dict[str, Any]:
-    # Only include keys explicitly provided
     kwargs: Dict[str, Any] = {}
     if use_ocr_results_with_table_cells is not None:
         kwargs["use_ocr_results_with_table_cells"] = use_ocr_results_with_table_cells
@@ -366,7 +369,7 @@ def _effective_params_from_query(
         if v is not None:
             p[k] = v
 
-    # Thresholds / batch sizes
+    # Thresholds / batches
     for k, v in [
         ("layout_threshold", layout_threshold),
         ("layout_nms", layout_nms),
@@ -409,7 +412,6 @@ def _get_or_create_pipeline(app: FastAPI, effective: Dict[str, Any]) -> PPStruct
     while len(cache) >= PIPELINE_CACHE_SIZE:
         cache.popitem(last=False)
 
-    # Merge defaults with overrides
     base_defaults = dict(
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
@@ -475,7 +477,7 @@ async def parse(
     use_seal_recognition: Optional[bool] = Query(None),
     use_region_detection: Optional[bool] = Query(None),
 
-    # Advanced table behavior toggles (predict-time)
+    # Advanced table behavior toggles (predict-time only)
     use_ocr_results_with_table_cells: Optional[bool] = Query(None),
     use_e2e_wired_table_rec_model: Optional[bool] = Query(None),
     use_e2e_wireless_table_rec_model: Optional[bool] = Query(None),
@@ -589,7 +591,7 @@ async def parse(
         # Choose pipeline
         pipeline = _get_or_create_pipeline(app, effective)
 
-        # Build predict-time kwargs for advanced table behavior
+        # Predict-time table behavior
         predict_kwargs = _build_predict_kwargs(
             use_ocr_results_with_table_cells,
             use_e2e_wired_table_rec_model,
