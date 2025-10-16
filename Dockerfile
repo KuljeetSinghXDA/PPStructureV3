@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# System deps commonly required by Paddle/OpenCV on CPU
+# System dependencies commonly required by Paddle/OpenCV on CPU
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libgl1 \
@@ -19,16 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Pip + PaddlePaddle CPU for aarch64 + PaddleOCR 3.2.0 + server deps
-# The aarch64 wheel index is required for PaddlePaddle on arm64 CPU.
-
-RUN python -m pip install --no-cache-dir "paddlepaddle" -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-
-    pip install --no-cache-dir \
+# Pip install PaddlePaddle CPU for aarch64 + PaddleOCR + server dependencies
+RUN python -m pip install --no-cache-dir "paddlepaddle" -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
+    python -m pip install --no-cache-dir \
       "paddleocr[all]" \
       fastapi \
       "uvicorn[standard]" \
-      opencv-python-headless==4.10.* \
+      opencv-python-headless \
       numpy \
       pyyaml \
       shapely \
@@ -37,6 +34,7 @@ RUN python -m pip install --no-cache-dir "paddlepaddle" -i https://www.paddlepad
       lxml \
       markdownify
 
+# Set working directory
 WORKDIR /app
 COPY ppstructurev3_server.py /app/ppstructurev3_server.py
 
@@ -45,6 +43,7 @@ ENV OMP_NUM_THREADS=4 \
     MKL_NUM_THREADS=4 \
     NUMEXPR_MAX_THREADS=4
 
+# Expose API port
 EXPOSE 8000
 
 # Start the API
