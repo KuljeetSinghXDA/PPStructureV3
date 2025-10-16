@@ -31,7 +31,7 @@ class PPStructureV3Config:
     layout_detection_model_name: str = "PP-DocLayout-L"
     text_detection_model_name: str = "PP-OCRv5_mobile_det"
     # The v5 mobile recognition model is multi-scenario; setting lang="en" specializes it to English
-    text_recognition_model_name: str = "PP-OCRv5_mobile_rec"
+    text_recognition_model_name: str = "en_PP-OCRv5_mobile_rec"
 
     # Optional local dirs if using downloaded models (keep None to pull officially)
     layout_detection_model_dir: str = None
