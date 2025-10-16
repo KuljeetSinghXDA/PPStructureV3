@@ -44,7 +44,6 @@ class PPStructureV3Config:
     use_table_recognition: bool = True
     use_formula_recognition: bool = True
     use_chart_recognition: bool = False            # disable chart VLM
-    use_chart_parsing: bool = False                # compatibility flag in some 3.x configs
     use_region_detection: bool = True
 
     # Detection params
@@ -130,7 +129,6 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
         use_table_recognition=cfg.use_table_recognition,
         use_formula_recognition=cfg.use_formula_recognition,
         use_chart_recognition=cfg.use_chart_recognition,
-        use_chart_parsing=cfg.use_chart_parsing,  # compatibility for some 3.x variants
         use_region_detection=cfg.use_region_detection,
 
         # det params
@@ -191,7 +189,7 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
 CONFIG = PPStructureV3Config()
 PIPELINE = build_pipeline(CONFIG)
 
-app = FastAPI(title="PP-StructureV3 Parser", version="1.2.0")
+app = FastAPI(title="PP-StructureV3 Parser", version="1.2.1")
 
 def _save_and_collect_outputs(res_list, work_dir: str) -> List[Dict[str, Any]]:
     """
@@ -261,11 +259,10 @@ async def parse(files: List[UploadFile] = File(...)):
                 content = await uf.read()
                 out.write(content)
 
-            # Predict; defensively disable chart parsing with both flags
+            # Predict; keep chart parsing off via the supported flag
             preds = PIPELINE.predict(
                 tmp_path,
-                use_chart_recognition=False,
-                use_chart_parsing=False
+                use_chart_recognition=False
             )
 
             # Save native outputs and collect into response
