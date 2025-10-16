@@ -42,7 +42,7 @@ def parse_documents(files: List[UploadFile] = File(...)):
             tmp_path = tmp_file.name
         try:
             # Perform document parsing with the PP-StructureV3 pipeline
-            output = pipeline.predict(input=tmp_path, **MODEL_CONFIG, **PIPELINE_CONFIG)
+            output = list(pipeline.predict(input=tmp_path, **MODEL_CONFIG, **PIPELINE_CONFIG))
             # Ensure output is a list (one result per page for multi-page files)
             if not isinstance(output, list):
                 output = [output]
