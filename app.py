@@ -22,7 +22,7 @@ class PPStructureV3Config:
     precision: str = "fp32"                  # "fp32" on CPU
     enable_mkldnn: bool = True               # CPU acceleration
     mkldnn_cache_capacity: int = 10
-    cpu_threads: int = 8
+    cpu_threads: int = 4
 
     # Language and general OCR behavior
     lang: str = "en"                         # English focus for medical lab reports
