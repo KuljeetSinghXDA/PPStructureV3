@@ -7,7 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Install PaddlePaddle (CPU), PaddleX with OCR extras, and FastAPI server requirements
-RUN pip install --no-cache-dir "paddlepaddle==3.2.0" "paddlex[ocr]==3.2.0" fastapi "uvicorn[standard]"
+RUN pip install --no-cache-dir \
+    "paddlepaddle==3.2.0" \
+    "paddlex[ocr]==3.2.0" \
+    fastapi \
+    "uvicorn[standard]" \
+    python-multipart
 
 # Copy the application code
 COPY app.py /app.py
