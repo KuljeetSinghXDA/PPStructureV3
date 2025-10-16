@@ -32,16 +32,16 @@ USE_CHART_RECOGNITION = False
 USE_REGION_DETECTION = True
 
 # Model overrides (latest from PP-StructureV3 / PaddleOCR 3.0)
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"  # Mobile for CPU efficiency on ARM64
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-plus-L"
+TEXT_DETECTION_MODEL_NAME = "en_PP-OCRv5_mobile_det"  # Mobile for CPU efficiency on ARM64
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-L"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
-SEAL_TEXT_DETECTION_MODEL_NAME = None
-SEAL_TEXT_RECOGNITION_MODEL_NAME = None  # Primarily for Chinese seals; toggle off for EN
+SEAL_TEXT_DETECTION_MODEL_NAME = "PP-OCRv4_server_seal_det"
+SEAL_TEXT_RECOGNITION_MODEL_NAME = "ch_PP-OCRv4_server_rec"  # Primarily for Chinese seals; toggle off for EN
 REGION_DETECTION_MODEL_NAME = None  # Uses default official model
 DOC_ORIENTATION_CLASSIFY_MODEL_NAME = None  # Default PP-LCNet_x1_0_doc_ori
 DOC_UNWARPING_MODEL_NAME = None  # Default UVDoc
@@ -85,6 +85,14 @@ USE_E2E_WIRELESS_TABLE_REC_MODEL = None  # Default False
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
+
+def sync_predict_with_semaphore(pipeline: PPStructureV3, img_path: str, overrides: Dict[str, Any], sem: threading.Semaphore):
+    """Synchronous wrapper to acquire semaphore, run predict, and release."""
+    sem.acquire()
+    try:
+        return pipeline.predict(img_path, **overrides)
+    finally:
+        sem.release()
 
 # ================= App & Lifespan =================
 @asynccontextmanager
@@ -232,16 +240,21 @@ async def parse_document(
             if locals_dict[key] is not None:
                 overrides[key] = locals_dict[key]
         
-        # Run prediction in threadpool with semaphore
-        async with app.state.predict_sem:
-            output = await run_in_threadpool(app.state.pipeline.predict, tmp_path, **overrides)
+        # Run prediction in threadpool with synchronous semaphore handling
+        output = await run_in_threadpool(
+            sync_predict_with_semaphore,
+            app.state.pipeline,
+            tmp_path,
+            overrides,
+            app.state.predict_sem
+        )
         
         # Process output based on format
         if output_format == "json":
             # Collect pruned results per page
             json_data = []
             for i, res in enumerate(output):
-                pruned = res.get("prunedResult", res)  # Fallback to full res if no pruned
+                pruned = res.get("result", res)  # Use 'result' key as per PP-StructureV3 output
                 json_data.append({"page_index": i, "result": pruned})
             return JSONResponse(content=json_data)
         
