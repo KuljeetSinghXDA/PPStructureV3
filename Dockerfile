@@ -1,46 +1,36 @@
-# syntax=docker/dockerfile:1.7
-# Target arm64/aarch64 CPU
-FROM --platform=linux/arm64/v8 python:3.13-slim
-
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
-# System dependencies commonly required by Paddle/OpenCV on CPU
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    libgomp1 \
-    ca-certificates \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
-
-# Pip install PaddlePaddle CPU for aarch64 + PaddleOCR + server dependencies
-RUN python -m pip install --no-cache-dir "paddlepaddle" -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
-    python -m pip install --no-cache-dir \
-      "paddleocr[all]" \
-      fastapi \
-      "uvicorn[standard]" \
-      beautifulsoup4 \
-      lxml \
-      markdownify \
-      python-multipart
+FROM python:3.13-slim
 
 # Set working directory
 WORKDIR /app
-COPY ppstructurev3_server.py /app/ppstructurev3_server.py
 
-# Reasonable CPU thread defaults
-ENV OMP_NUM_THREADS=4 \
-    MKL_NUM_THREADS=4 \
-    NUMEXPR_MAX_THREADS=4
+# Install system dependencies required for PaddlePaddle and OpenCV
+RUN apt-get update && apt-get install -y \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Expose API port
+# Install PaddlePaddle and PaddleOCR
+RUN pip install --no-cache-dir "paddlepaddle==3.2.0" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
+RUN pip install --no-cache-dir "paddleocr[all]==3.3.0"
+
+# Install additional dependencies for FastAPI and web server
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn \
+    python-multipart \
+    python-magic \
+    pydantic
+
+# Copy application code
+COPY app.py /app/
+COPY models_config.py /app/
+
+# Expose port
 EXPOSE 8000
 
-# Start the API
-CMD ["uvicorn", "ppstructurev3_server:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the application
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
