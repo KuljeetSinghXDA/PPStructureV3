@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Install PaddlePaddle 3.3.0 from nightly CPU index (supports ARM64 via compatible wheels)
-RUN pip install --no-cache-dir "paddlepaddle==3.3.0" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
+RUN pip install --no-cache-dir "paddlepaddle" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
 
 # Install PaddleOCR 3.3.0 with all extras for full PP-StructureV3 features
 RUN pip install --no-cache-dir "paddleocr[all]==3.3.0"
