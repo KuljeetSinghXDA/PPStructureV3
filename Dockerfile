@@ -4,9 +4,6 @@ FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    # Paddle runs best with these envs on CPU
-    OMP_NUM_THREADS=8 \
-    MKL_NUM_THREADS=8
 
 # System deps required by wheels like opencv-headless/PDF/image libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,10 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #    See official install guide. 
 #    https://www.paddleocr.ai/main/en/version3.x/installation.html
 RUN python -m pip install --upgrade pip \
- && python -m pip install "paddlepaddle==3.0.0" -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+ && python -m pip install "paddlepaddle" -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
 
 # 2) Install PaddleOCR 3.2.0 with doc-parser extras and API server deps
-RUN python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi==0.115.5 uvicorn[standard]==0.32.0
+RUN python -m pip install "paddleocr[all]" fastapi==0.115.5 uvicorn[standard]==0.32.0
 
 # Copy app
 WORKDIR /app
