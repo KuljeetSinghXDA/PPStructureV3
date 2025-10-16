@@ -231,7 +231,6 @@ def _maybe_override_engine(
         text_det_limit_type=text_det_limit_type if text_det_limit_type is not None else TEXT_DET_LIMIT_TYPE,
         text_rec_score_thresh=text_rec_score_thresh if text_rec_score_thresh is not None else TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=text_recognition_batch_size if text_recognition_batch_size is not None else TEXT_RECOGNITION_BATCH_SIZE,
-        show_log=False,
     )
 
 
