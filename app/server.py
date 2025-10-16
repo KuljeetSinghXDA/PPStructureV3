@@ -1,269 +1,389 @@
-# app/server.py
-import os
-import tempfile
-import threading
+# app/app/server.py
+import base64
+import io
 import json
+import os
+import threading
+import tempfile
 import shutil
 from pathlib import Path
-from typing import List, Literal, Optional
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse, FileResponse
+from typing import Any, Dict, List, Optional, Union
+
+import fitz  # PyMuPDF
+from fastapi import FastAPI, File, HTTPException, UploadFile, Form, Query
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field, validator
+from contextlib import asynccontextmanager
 
-# This is a community-supported HPI; may require extra dependencies if enabled.
-# See: https://github.com/HolidayPony/PaddleOCR-HPI
-ENABLE_HPI = False
-
-# MKL-DNN is a performance library for Intel CPUs.
-# It is safe to enable on ARM64, but will have no effect.
-ENABLE_MKLDNN = True
-
-
+# PaddleOCR PP-StructureV3 pipeline
 from paddleocr import PPStructureV3
 
-# ================= Core Configuration (Default Values) =================
-# These values are used to initialize the pipeline but can be overridden
-# by query parameters in the /parse endpoint for per-request customization.
-
+# ================= Core Configuration (safe CPU defaults) =================
 DEVICE = "cpu"
-CPU_THREADS = os.cpu_count() or 4
+CPU_THREADS = int(os.environ.get("OMP_NUM_THREADS", "4"))
+ENABLE_HPI = False
+ENABLE_MKLDNN = True
+MKLDNN_CACHE_CAPACITY = 10
+PRECISION = "fp32"
 
-# --- Optional Pre-processing Modules ---
-# These can improve accuracy on skewed or rotated documents but add latency.
-USE_DOC_ORIENTATION_CLASSIFY = False
-USE_DOC_UNWARPING = False
-USE_TEXTLINE_ORIENTATION = False
+# I/O and service limits
+ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+MAX_FILE_SIZE_MB = 50
+MAX_PARALLEL_PREDICT = 1
 
-# --- Sub-pipeline Toggles ---
-USE_TABLE_RECOGNITION = True
-USE_FORMULA_RECOGNITION = False
-USE_CHART_RECOGNITION = False
-USE_KIE = False # Key Information Extraction
+# ==================== Pydantic request models ====================
+class LayoutUnclipType(BaseModel):
+    # Accept float, list[float], or dict[str,float]
+    value: Union[float, List[float], Dict[str, float]]
 
-# --- Model Overrides ---
-# Using the latest large/server models by default for max accuracy.
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_server_det"
-TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_server_rec" # Change 'en' for other languages
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
-TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
-FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S" # Faster version
-CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
-KIE_MODEL_NAME = "kie_ppstructure_SER_en"
+class ParseParams(BaseModel):
+    # General output controls
+    return_json: bool = True
+    return_markdown: bool = True
+    concat_markdown: bool = True
+    visualize: Optional[bool] = False
+    include_input_image: bool = False
 
-# --- Detection/Recognition Parameters ---
-LAYOUT_THRESHOLD = 0.5
-TEXT_DET_THRESH = 0.3
-TEXT_DET_BOX_THRESH = 0.6
-TEXT_DET_UNCLIP_RATIO = 1.6
-TEXT_DET_LIMIT_SIDE_LEN = 960
-TEXT_DET_LIMIT_TYPE = 'max'
-TEXT_REC_SCORE_THRESH = 0.5
-TEXT_RECOGNITION_BATCH_SIZE = 6
+    # JSON formatting
+    format_json: bool = True
+    indent: int = 2
+    ensure_ascii: bool = False
 
-# --- I/O and Service Limits ---
-ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
-MAX_FILE_SIZE_MB = 100
-MAX_PARALLEL_PREDICT = 1 # Set to 1 to avoid high memory usage with large models.
+    # Optional page range for PDFs (1-based inclusive)
+    page_from: Optional[int] = None
+    page_to: Optional[int] = None
 
-# ================= App & Lifespan =================
+    # Language (optional) - when set, PPStructureV3(lang=...) will be re-instantiated at startup only
+    # For per-request we keep pipeline default; this param is present for future extension.
+    lang: Optional[str] = None
 
+    # Predict-time sub-pipeline toggles
+    use_doc_orientation_classify: Optional[bool] = None
+    use_doc_unwarping: Optional[bool] = None
+    use_textline_orientation: Optional[bool] = None
+    use_table_recognition: Optional[bool] = None
+    use_formula_recognition: Optional[bool] = None
+    use_chart_recognition: Optional[bool] = None
+    use_seal_recognition: Optional[bool] = None
+    use_region_detection: Optional[bool] = None
+    use_table_cells_ocr_results: Optional[bool] = None
+    use_e2e_wired_table_rec_model: Optional[bool] = None
+    use_e2e_wireless_table_rec_model: Optional[bool] = None
+
+    # Layout detection thresholds/postprocess
+    layout_threshold: Optional[Union[float, Dict[int, float]]] = None
+    layout_nms: Optional[bool] = None
+    layout_unclip_ratio: Optional[Union[float, List[float], Dict[str, float]]] = None
+    layout_merge_bboxes_mode: Optional[Union[str, Dict[str, Any]]] = None
+
+    # Text detection & recognition
+    text_det_limit_side_len: Optional[int] = None
+    text_det_limit_type: Optional[str] = None
+    text_det_thresh: Optional[float] = None
+    text_det_box_thresh: Optional[float] = None
+    text_det_unclip_ratio: Optional[float] = None
+    text_rec_score_thresh: Optional[float] = None
+
+    # Batch sizes (predict-time)
+    text_recognition_batch_size: Optional[int] = None
+    textline_orientation_batch_size: Optional[int] = None
+    chart_recognition_batch_size: Optional[int] = None
+    seal_text_recognition_batch_size: Optional[int] = None
+    formula_recognition_batch_size: Optional[int] = None
+
+    # Seal detection thresholds
+    seal_det_limit_side_len: Optional[int] = None
+    seal_det_limit_type: Optional[str] = None
+    seal_det_thresh: Optional[float] = None
+    seal_det_box_thresh: Optional[float] = None
+    seal_det_unclip_ratio: Optional[float] = None
+    seal_rec_score_thresh: Optional[float] = None
+
+    # Visualization control: return which images; if None or empty -> default from pipeline
+    # Valid keys roughly include: layout_det_res, overall_ocr_res, text_paragraphs_ocr_res,
+    # formula_res_region1, table_cell_img, seal_res_region1
+    return_image_keys: Optional[List[str]] = None
+
+    @validator("text_det_limit_type", "seal_det_limit_type")
+    def _valid_limit_type(cls, v):
+        if v is not None and v not in ("min", "max"):
+            raise ValueError("limit_type must be 'min' or 'max'")
+        return v
+
+class ParseResponse(BaseModel):
+    pages: int
+    filetype: str
+    layoutParsingResults: List[Dict[str, Any]]
+    concatenatedMarkdown: Optional[Dict[str, Any]] = None
+    dataInfo: Dict[str, Any]
+
+# ==================== Utilities ====================
+def _ext_ok(name: str) -> bool:
+    return Path(name).suffix.lower() in ALLOWED_EXTENSIONS
+
+def _check_file_size(f: UploadFile):
+    f.file.seek(0, io.SEEK_END)
+    size = f.file.tell()
+    f.file.seek(0)
+    if size > MAX_FILE_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"File too large (> {MAX_FILE_SIZE_MB} MB).")
+
+def _save_upload(tmpdir: Path, up: UploadFile) -> Path:
+    dst = tmpdir / Path(up.filename).name
+    with open(dst, "wb") as w:
+        shutil.copyfileobj(up.file, w)
+    return dst
+
+def _pdf_slice(src: Path, page_from: Optional[int], page_to: Optional[int]) -> Path:
+    """
+    Slice a PDF to the given 1-based inclusive range.
+    """
+    if page_from is None and page_to is None:
+        return src
+    doc = fitz.open(src)
+    n = len(doc)
+    start = max(1, page_from or 1)
+    end = min(n, page_to or n)
+    if start > end:
+        raise HTTPException(status_code=400, detail="Invalid page range.")
+    out = fitz.open()
+    for p in range(start - 1, end):
+        out.insert_pdf(doc, from_page=p, to_page=p)
+    sliced = src.parent / f"{src.stem}_p{start}-{end}.pdf"
+    out.save(sliced)
+    out.close()
+    doc.close()
+    return sliced
+
+def _pil_to_b64(pil_img) -> str:
+    buf = io.BytesIO()
+    pil_img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+# ==================== App & Lifespan ====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Initializes the PPStructureV3 pipeline on application startup.
-    This is a long-running operation and should only be done once.
+    Create a single PP-StructureV3 pipeline instance with CPU-only,
+    MKL-DNN enabled, HPI off by default (can be toggled if needed).
     """
-    print("Initializing PP-StructureV3 pipeline...")
-    # Initialize with default models. Most parameters can be overridden at prediction time.
-    app.state.pipeline = PPStructureV3(
+    pipeline = PPStructureV3(
         device=DEVICE,
-        enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
+        enable_mkldnn=ENABLE_MKLDNN,
+        mkldnn_cache_capacity=MKLDNN_CACHE_CAPACITY,
         cpu_threads=CPU_THREADS,
-        layout_model_dir=LAYOUT_DETECTION_MODEL_NAME, # Use updated param names
-        det_model_dir=TEXT_DETECTION_MODEL_NAME,
-        rec_model_dir=TEXT_RECOGNITION_MODEL_NAME,
-        table_model_dir=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME, # Combines wired/wireless
-        table_char_type='en', # Assumes english table content
-        formula_model_dir=FORMULA_RECOGNITION_MODEL_NAME,
-        ser_model_dir=KIE_MODEL_NAME,
-        # The following params are typically set at prediction time
-        use_angle_cls=USE_DOC_ORIENTATION_CLASSIFY,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-        lang='en' # Default language
+        precision=PRECISION,
+        # Keep model names None to use pipeline defaults; request-level toggles are passed to predict().
+        # If you want to pin specific models, you can set the *_model_name/_model_dir args here.
     )
-    # Semaphore to limit concurrent predictions and prevent OOM errors.
+    app.state.pipeline = pipeline
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
-    print("Pipeline initialized successfully.")
     yield
-    # Clean up resources if needed (though not strictly necessary here)
-    del app.state.pipeline
+    # Pipeline uses lazy-loaded models; no explicit close needed.
 
+app = FastAPI(title="PP-StructureV3 /parse API", version="1.1.0", lifespan=lifespan)
 
-app = FastAPI(
-    title="PP-StructureV3 Document Analysis API",
-    description="A FastAPI wrapper for PaddleOCR's PP-StructureV3, exposing all major features for document parsing, table/formula recognition, and layout recovery.",
-    version="1.1.0",
-    lifespan=lifespan
-)
-
-
-def format_to_markdown(result_data: list) -> str:
-    """
-    Formats the structured JSON output from PP-StructureV3 into Markdown.
-    """
-    md_string = ""
-    for item in result_data:
-        region_type = item.get('type', 'text').lower()
-        content = item.get('res', '')
-        
-        if region_type == 'title':
-            md_string += f"# {content}\n\n"
-        elif region_type == 'text':
-            md_string += f"{content}\n\n"
-        elif region_type == 'figure':
-            md_string += f"![figure]({item.get('img_path', 'image')})\n*Caption: {content}*\n\n"
-        elif region_type == 'table':
-            # `res` for a table is an HTML string
-            md_string += f"### Table\n{content}\n\n"
-        elif region_type == 'formula':
-            # `res` for a formula is a LaTeX string
-            md_string += f"### Formula\n```latex\n{content}\n```\n\n"
-        elif region_type == 'header':
-            md_string += f"**Header:** {content}\n\n"
-        elif region_type == 'footer':
-            md_string += f"**Footer:** {content}\n\n"
-        else:
-            md_string += f"**[{region_type.capitalize()}]**\n{content}\n\n"
-            
-    return md_string.strip()
-
-
-@app.get("/health", summary="Check service health")
+@app.get("/health")
 def health():
-    """A simple health check endpoint."""
-    return {"status": "ok", "pipeline_initialized": hasattr(app.state, 'pipeline')}
+    return {"status": "ok"}
 
-@app.post(
-    "/parse",
-    summary="Parse a document image or PDF",
-    description="Upload a document file (PDF, PNG, JPG, BMP) to perform comprehensive layout analysis and OCR."
-)
+@app.post("/parse")
 async def parse(
-    file: UploadFile = File(..., description="The document file to parse."),
-
-    # --- Major Feature Toggles ---
-    output_format: Literal["json", "markdown"] = Query("json", description="The desired format for the structured text output."),
-    recovery: bool = Query(False, description="Enable layout recovery to generate a .docx file and .xlsx for tables. Overrides 'output_format'."),
-    page_num: int = Query(0, description="For PDF files, the page number to process (0-indexed). 0 means all pages."),
-    
-    # --- Sub-pipeline Toggles ---
-    use_table_recognition: bool = Query(USE_TABLE_RECOGNITION, description="Enable table detection and structure recognition."),
-    use_formula_recognition: bool = Query(USE_FORMULA_RECOGNITION, description="Enable mathematical formula detection and recognition."),
-    use_chart_recognition: bool = Query(USE_CHART_RECOGNITION, description="Enable chart detection and recognition."),
-    use_kie: bool = Query(USE_KIE, description="Enable Key Information Extraction for form-like documents."),
-    
-    # --- Fine-tuning Parameters ---
-    return_ocr_result_in_table: bool = Query(True, description="If True, OCR results for text inside tables are returned."),
-    
-    # --- OCR Pre-processing ---
-    use_doc_orientation_classify: bool = Query(USE_DOC_ORIENTATION_CLASSIFY, description="Enable document orientation classification (0, 90, 180, 270 degrees)."),
-    use_textline_orientation: bool = Query(USE_TEXTLINE_ORIENTATION, description="Enable text line orientation classification (horizontal vs. vertical)."),
-    
-    # --- Detection Thresholds ---
-    layout_threshold: Optional[float] = Query(LAYOUT_THRESHOLD, description="Threshold for layout detection confidence.", ge=0, le=1),
-    text_det_limit_side_len: Optional[int] = Query(TEXT_DET_LIMIT_SIDE_LEN, description="Resize image to this size for the long side before text detection."),
+    file: UploadFile = File(..., description="Image or PDF"),
+    params_json: Optional[str] = Form(default=None, description="JSON string of ParseParams"),
+    # Minimal toggles also exposed as query for convenience:
+    return_markdown: Optional[bool] = Query(None),
+    return_json: Optional[bool] = Query(None),
 ):
-    """
-    **Main endpoint to parse a document.** It provides extensive control over the `PP-StructureV3` pipeline.
-    
-    - **Basic Usage:** Upload a file to get a structured JSON of the content.
-    - **Markdown Output:** Set `output_format=markdown`.
-    - **DOCX Recovery:** Set `recovery=true`. The API will return a `.docx` file instead of JSON/Markdown.
-    - **PDFs:** By default, it processes all pages. Use `page_num` to specify a single page.
-    """
-    # 1. File validation
-    file_extension = Path(file.filename).suffix.lower()
-    if file_extension not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"File type not allowed. Please use one of: {ALLOWED_EXTENSIONS}")
+    if not _ext_ok(file.filename):
+        raise HTTPException(status_code=415, detail=f"Unsupported file type: {Path(file.filename).suffix}")
+    _check_file_size(file)
 
-    contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise HTTPException(status_code=413, detail=f"File size exceeds the limit of {MAX_FILE_SIZE_MB} MB.")
-
-    # 2. Process the file in a thread-safe manner
-    temp_dir = None
+    # Merge params from form JSON + query fallbacks
     try:
-        # PPStructure works best with file paths, so we write the uploaded content to a temporary file.
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension, dir="./") as temp_file:
-            temp_file.write(contents)
-            temp_filepath = temp_file.name
-
-        # Create a temporary directory for outputs if recovery is enabled
-        if recovery:
-            temp_dir = tempfile.mkdtemp(dir="./")
-
-        # Acquire semaphore to limit concurrency
-        async with app.state.predict_sem:
-            print(f"Starting parsing for file: {file.filename}")
-            
-            # 3. Call the pipeline using run_in_threadpool to avoid blocking the event loop
-            result = await run_in_threadpool(
-                app.state.pipeline,
-                img_path=temp_filepath,
-                page_num=page_num,
-                # Pass all runtime parameters to the prediction call
-                return_ocr_result_in_table=return_ocr_result_in_table,
-                use_visual_backbone=use_kie, # `use_visual_backbone` controls KIE
-                recovery=recovery,
-                output_dir=temp_dir,
-                # Sub-pipelines
-                table=use_table_recognition,
-                formula=use_formula_recognition,
-                chart=use_chart_recognition,
-                # Thresholds & settings
-                layout_threshold=layout_threshold,
-                ocr_dict={
-                    "use_angle_cls": use_doc_orientation_classify,
-                    "use_textline_orientation": use_textline_orientation,
-                    "det_limit_side_len": text_det_limit_side_len,
-                 }
-            )
-            print(f"Finished parsing for file: {file.filename}")
-
-        # 4. Format and return the response
-        if recovery and temp_dir:
-            # If recovery is on, the model saves files to `temp_dir`.
-            # We need to find the .docx file and return it.
-            output_files = os.listdir(temp_dir)
-            doc_file = next((f for f in output_files if f.endswith('.docx')), None)
-            if doc_file:
-                doc_path = os.path.join(temp_dir, doc_file)
-                return FileResponse(
-                    path=doc_path,
-                    filename=f"{Path(file.filename).stem}.docx",
-                    media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                )
-            else:
-                 raise HTTPException(status_code=500, detail="Document recovery was enabled, but no DOCX file was generated.")
-
-        elif output_format == "markdown":
-            markdown_content = format_to_markdown(result)
-            return PlainTextResponse(content=markdown_content)
-            
-        else: # Default is JSON
-            return JSONResponse(content=result)
-
+        req = ParseParams(**(json.loads(params_json) if params_json else {}))
     except Exception as e:
-        # Broad exception to catch errors from the Paddle pipeline
-        raise HTTPException(status_code=500, detail=f"An error occurred during processing: {str(e)}")
-    
-    finally:
-        # Clean up temporary files and directories
-        if 'temp_filepath' in locals() and os.path.exists(temp_filepath):
-            os.remove(temp_filepath)
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+        raise HTTPException(status_code=400, detail=f"Invalid params_json: {e}")
+
+    if return_markdown is not None:
+        req.return_markdown = return_markdown
+    if return_json is not None:
+        req.return_json = return_json
+
+    with tempfile.TemporaryDirectory() as td:
+        tmpdir = Path(td)
+        src_path = _save_upload(tmpdir, file)
+
+        # Optional page-range slicing for PDFs
+        in_path = src_path
+        if src_path.suffix.lower() == ".pdf":
+            in_path = _pdf_slice(src_path, req.page_from, req.page_to)
+
+        # Semaphore to cap concurrent inferences
+        sem = app.state.predict_sem
+        sem.acquire()
+        try:
+            # Build predict() kwargs from request
+            predict_kwargs: Dict[str, Any] = {}
+
+            # Sub-pipeline toggles
+            for k in (
+                "use_doc_orientation_classify",
+                "use_doc_unwarping",
+                "use_textline_orientation",
+                "use_table_recognition",
+                "use_formula_recognition",
+                "use_chart_recognition",
+                "use_seal_recognition",
+                "use_region_detection",
+                "use_table_cells_ocr_results",
+                "use_e2e_wired_table_rec_model",
+                "use_e2e_wireless_table_rec_model",
+            ):
+                v = getattr(req, k)
+                if v is not None:
+                    predict_kwargs[k] = v
+
+            # Layout & OCR thresholds
+            for k in (
+                "layout_threshold",
+                "layout_nms",
+                "layout_unclip_ratio",
+                "layout_merge_bboxes_mode",
+                "text_det_limit_side_len",
+                "text_det_limit_type",
+                "text_det_thresh",
+                "text_det_box_thresh",
+                "text_det_unclip_ratio",
+                "text_rec_score_thresh",
+                "seal_det_limit_side_len",
+                "seal_det_limit_type",
+                "seal_det_thresh",
+                "seal_det_box_thresh",
+                "seal_det_unclip_ratio",
+                "seal_rec_score_thresh",
+                "text_recognition_batch_size",
+                "textline_orientation_batch_size",
+                "chart_recognition_batch_size",
+                "seal_text_recognition_batch_size",
+                "formula_recognition_batch_size",
+            ):
+                v = getattr(req, k)
+                if v is not None:
+                    predict_kwargs[k] = v
+
+            # Visualization control
+            if req.visualize is not None:
+                predict_kwargs["visualize"] = req.visualize
+
+            # Run predict in threadpool to avoid blocking event loop
+            def _run_predict():
+                return list(app.state.pipeline.predict(input=str(in_path), **predict_kwargs))
+
+            output_list = await run_in_threadpool(_run_predict)
+
+        finally:
+            sem.release()
+
+        # Build response
+        pages = len(output_list)
+        result_pages: List[Dict[str, Any]] = []
+
+        for res in output_list:
+            page_obj: Dict[str, Any] = {}
+
+            # JSON
+            if req.return_json:
+                # res.json is already a structured dict; pretty-print if requested
+                if req.format_json:
+                    page_obj["json"] = json.loads(json.dumps(res.json, ensure_ascii=req.ensure_ascii))
+                else:
+                    page_obj["json"] = res.json
+
+            # Markdown
+            if req.return_markdown:
+                md = res.markdown  # dict: {markdown_texts, markdown_images, page_continuation_flags}
+                # Convert PIL images to base64 if present
+                md_images64 = []
+                for im in md.get("markdown_images", []) or []:
+                    md_images64.append(_pil_to_b64(im))
+                page_obj["markdown"] = {
+                    "markdown_texts": md.get("markdown_texts"),
+                    "markdown_images_b64": md_images64,
+                    "page_continuation_flags": md.get("page_continuation_flags"),
+                }
+
+            # Visualization images (optional)
+            if req.visualize:
+                imgs = res.img  # dict of PIL.Image
+                selected_keys = req.return_image_keys or list(imgs.keys())
+                vis_dict = {}
+                for k in selected_keys:
+                    im = imgs.get(k)
+                    if im is not None:
+                        vis_dict[k] = _pil_to_b64(im)
+                page_obj["outputImages"] = vis_dict
+
+            # Optionally include the input image (only when image input)
+            if req.include_input_image and src_path.suffix.lower() != ".pdf":
+                try:
+                    from PIL import Image
+                    im = Image.open(src_path)
+                    page_obj["inputImage"] = _pil_to_b64(im)
+                except Exception:
+                    page_obj["inputImage"] = None
+
+            # A pruned version of res.json without path/page (if available)
+            if "res" in (res.json or {}):
+                pruned = dict(res.json["res"])
+                pruned.pop("input_path", None)
+                pruned.pop("page_index", None)
+                page_obj["prunedResult"] = pruned
+
+            result_pages.append(page_obj)
+
+        # Concatenate Markdown across pages if requested
+        concatenated_md: Optional[Dict[str, Any]] = None
+        if req.return_markdown and req.concat_markdown and pages > 1:
+            # Prefer pipeline's helper if available; otherwise do a simple concat
+            try:
+                md_list = [r["markdown"] for r in result_pages if "markdown" in r]
+                if hasattr(app.state.pipeline, "concatenate_markdown_pages"):
+                    merged_texts, merged_images, flags = app.state.pipeline.concatenate_markdown_pages(md_list)  # type: ignore
+                    concatenated_md = {
+                        "markdown_texts": merged_texts,
+                        "markdown_images_b64": [ _pil_to_b64(im) for im in (merged_images or []) ],
+                        "page_continuation_flags": flags,
+                    }
+                else:
+                    # Fallback: naive concatenation of texts and images
+                    all_texts: List[str] = []
+                    all_imgs_b64: List[str] = []
+                    for md in md_list:
+                        all_texts.extend(md.get("markdown_texts") or [])
+                        all_imgs_b64.extend(md.get("markdown_images_b64") or [])
+                    concatenated_md = {
+                        "markdown_texts": all_texts,
+                        "markdown_images_b64": all_imgs_b64,
+                        "page_continuation_flags": None,
+                    }
+            except Exception:
+                concatenated_md = None
+
+        resp = ParseResponse(
+            pages=pages,
+            filetype=src_path.suffix.lower(),
+            layoutParsingResults=result_pages,
+            concatenatedMarkdown=concatenated_md,
+            dataInfo={
+                "filename": file.filename,
+                "input_path": str(in_path.name),
+                "page_range_used": {
+                    "from": req.page_from,
+                    "to": req.page_to,
+                } if src_path.suffix.lower() == ".pdf" else None,
+            },
+        )
+        return JSONResponse(content=json.loads(resp.json()))
