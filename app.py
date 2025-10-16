@@ -22,7 +22,7 @@ class PPStructureV3Config:
     precision: str = "fp32"                  # "fp32" on CPU
     enable_mkldnn: bool = True               # MKL-DNN acceleration on CPU
     mkldnn_cache_capacity: int = 10
-    cpu_threads: int = 8
+    cpu_threads: int = 4
 
     # Language and general OCR behavior
     lang: str = "en"                         # English focus for medical lab reports
@@ -96,7 +96,7 @@ class PPStructureV3Config:
     seal_rec_score_thresh: float = 0.0
     chart_recognition_model_name: str = None
     chart_recognition_model_dir: str = None
-    chart_recognition_batch_size: int = 1
+    chart_recognition_batch_size: int = None
 
 def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
     kwargs = dict(
