@@ -59,7 +59,6 @@ class PPStructureEngine:
         text_det_limit_type: Optional[str] = None,
         text_rec_score_thresh: Optional[float] = None,
         text_recognition_batch_size: Optional[int] = None,
-        show_log: bool = False,
     ) -> None:
         kwargs: Dict[str, Any] = dict(
             device=device,
@@ -92,15 +91,15 @@ class PPStructureEngine:
             text_det_limit_type=text_det_limit_type,
             text_rec_score_thresh=text_rec_score_thresh,
             text_recognition_batch_size=text_recognition_batch_size,
-
-            show_log=show_log,
         )
 
         # Drop None-valued keys to avoid surprising overrides
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
-        # Some fallbacks may not accept all kwargs; filter using the signature if needed
-        # For simplicity, try construct; on error, progressively reduce kwargs.
+        # Remove any deprecated arguments if present
+        kwargs.pop("show_log", None)
+
+        # Try to initialize the engine
         self._engine = None
         last_err = None
         try:
