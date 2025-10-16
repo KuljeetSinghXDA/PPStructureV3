@@ -45,7 +45,6 @@ class PPStructureV3Config:
     use_seal_recognition: bool = False
     use_table_recognition: bool = True
     use_formula_recognition: bool = True
-    use_chart_recognition: bool = False
     use_region_detection: bool = True
 
     # Detection params (native defaults retained unless you know a domain-specific need)
@@ -94,9 +93,6 @@ class PPStructureV3Config:
     seal_text_recognition_model_dir: str = None
     seal_text_recognition_batch_size: int = 1
     seal_rec_score_thresh: float = 0.0
-    chart_recognition_model_name: str = None
-    chart_recognition_model_dir: str = None
-    chart_recognition_batch_size: int = None
 
 def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
     kwargs = dict(
@@ -181,10 +177,6 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
         seal_text_recognition_batch_size=cfg.seal_text_recognition_batch_size,
         seal_rec_score_thresh=cfg.seal_rec_score_thresh,
 
-        # Chart models
-        chart_recognition_model_name=cfg.chart_recognition_model_name,
-        chart_recognition_model_dir=cfg.chart_recognition_model_dir,
-        chart_recognition_batch_size=cfg.chart_recognition_batch_size,
     )
     return PPStructureV3(**{k: v for k, v in kwargs.items() if v is not None})
 
