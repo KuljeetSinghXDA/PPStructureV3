@@ -116,7 +116,7 @@ class PipelineInitConfig:
     precision: str = "fp32"
     enable_mkldnn: bool = True  # CPU acceleration
     mkldnn_cache_capacity: int = 10
-    cpu_threads: int = 8
+    cpu_threads: int = 4
 
     # Optional external PDX config
     paddlex_config: Optional[str] = None
