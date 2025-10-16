@@ -96,9 +96,6 @@ class PPStructureEngine:
         # Drop None-valued keys to avoid surprising overrides
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
-        # Remove any deprecated arguments if present
-        kwargs.pop("show_log", None)
-
         # Try to initialize the engine
         self._engine = None
         last_err = None
