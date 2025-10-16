@@ -25,11 +25,6 @@ RUN python -m pip install --no-cache-dir "paddlepaddle" -i https://www.paddlepad
       "paddleocr[all]" \
       fastapi \
       "uvicorn[standard]" \
-      opencv-python-headless \
-      numpy \
-      pyyaml \
-      shapely \
-      pillow \
       beautifulsoup4 \
       lxml \
       markdownify \
