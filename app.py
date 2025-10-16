@@ -68,7 +68,7 @@ class PipelineInitConfig:
     table_classification_model_dir: Optional[str] = None
     wired_table_structure_recognition_model_name: Optional[str] = None
     wired_table_structure_recognition_model_dir: Optional[str] = None
-    wireless_table_structure_recognition_model_name: Optional[str] = "SLANet_plus"
+    wireless_table_structure_recognition_model_name: Optional[str] = None
     wireless_table_structure_recognition_model_dir: Optional[str] = None
     wired_table_cells_detection_model_name: Optional[str] = None
     wired_table_cells_detection_model_dir: Optional[str] = None
