@@ -1,3 +1,4 @@
+#Dockerfile
 FROM python:3.13-slim
 
 # Noninteractive apt to avoid debconf warnings
@@ -5,18 +6,20 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DEBCONF_NONINTERACTIVE_SEEN=true \
     DEBCONF_NOWARNINGS=yes
 
-# Latest GL/GUI libs commonly required by CV backends used by PaddleOCR, plus poppler-utils for PDF support via pdf2image
+# Latest GL/GUI libs commonly required by CV backends used by PaddleOCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 wget poppler-utils && \
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 wget && \
     rm -rf /var/lib/apt/lists/*
 
 # Latest pip + Paddle CPU wheel from official CPU index (Armv8/aarch64 supported),
-# plus PaddleOCR (doc-parser), pdf2image for PDF handling, FastAPI, Uvicorn, and python-multipart
+# plus PaddleOCR (doc-parser), FastAPI, Uvicorn, and python-multipart
+# Added python-docx and openpyxl for document/table recovery to .docx/.xlsx files
 RUN python -m pip install --no-cache-dir -U pip --root-user-action=ignore \
  && python -m pip install --no-cache-dir paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ --root-user-action=ignore \
- && python -m pip install --no-cache-dir "paddleocr[all]" pdf2image fastapi uvicorn[standard] python-multipart --root-user-action=ignore
+ && python -m pip install --no-cache-dir "paddleocr[all]" fastapi uvicorn[standard] python-multipart python-docx openpyxl --root-user-action=ignore
 
 WORKDIR /app
+# Ensure you have your server.py inside an 'app' directory
 COPY app /app/app
 
 EXPOSE 8000
