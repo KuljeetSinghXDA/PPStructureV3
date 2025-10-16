@@ -1,6 +1,7 @@
 """
-PP-StructureV3 Configuration for Medical Lab Reports
+PP-StructureV3 Configuration for Medical Lab Reports - CORRECTED VERSION
 All models and parameters configurable through this file
+Updated to use valid parameters for PaddleOCR 3.x
 """
 
 # PP-StructureV3 Configuration for ARM64 CPU
@@ -12,59 +13,45 @@ MODELS_CONFIG = {
     "det_model_dir": "PP-OCRv5_mobile_det",  # Text detection
     "rec_model_dir": "en_PP-OCRv5_mobile_rec",  # English text recognition
     
-    # Table Recognition (default)
-    "table_model_dir": None,  # Will use default
-    
-    # Formula Recognition (default) 
-    "formula_model_dir": None,  # Will use default
-    
-    # KIE Models (default)
-    "kie_model_dir": None,  # Will use default
-    "ser_model_dir": None,  # Will use default
-    "re_model_dir": None,   # Will use default
-    
     # Processing Parameters optimized for medical lab reports
     "processing_params": {
-        # Layout Analysis
+        # Layout Analysis :cite[8]
         "layout_score_threshold": 0.5,
         "layout_nms_threshold": 0.5,
         
-        # OCR Parameters
+        # OCR Parameters :cite[10]
         "det_limit_side_len": 736,
         "det_limit_type": "min",
         "det_db_thresh": 0.3,
         "det_db_box_thresh": 0.6,
         "det_db_unclip_ratio": 1.5,
         
-        # Text Recognition
+        # Text Recognition - REMOVED INVALID drop_score parameter
         "rec_image_shape": "3, 48, 320",
         "rec_batch_num": 8,
         "max_text_length": 256,
-        "drop_score": 0.5,
         
-        # Table Recognition
+        # Table Recognition :cite[4]
         "table_max_len": 488,
         "merge_no_span_structure": True,
         
         # Document Recovery
         "recovery_to_markdown": True,
-        "use_pdf2docx_api": False,
         
         # Image Preprocessing
         "invert": False,
         "binarize": False,
-        "alphacolor": (255, 255, 255),
         
         # Language
         "lang": "en",
         
-        # Device - CPU for ARM64
+        # Device - CPU for ARM64 :cite[10]
         "use_gpu": False,
         "enable_mkldnn": True,  # Optimize for CPU
         "cpu_threads": 4,
     },
     
-    # PP-StructureV3 Pipeline Features
+    # PP-StructureV3 Pipeline Features :cite[8]:cite[10]
     "pipeline_features": {
         "layout": True,      # Layout analysis
         "table": True,       # Table recognition  
@@ -72,33 +59,32 @@ MODELS_CONFIG = {
         "ocr": True,         # OCR text extraction
         "recovery": True,    # Document recovery to Markdown
         "kie": False,        # Key Information Extraction (disable if not needed)
+        "use_doc_orientation_classify": False,
+        "use_doc_unwarping": False,
+        "use_textline_orientation": False,
     }
 }
 
 def get_structurev3_kwargs():
     """
     Generate kwargs for PP-StructureV3 initialization based on configuration
+    Uses valid parameters for PaddleOCR 3.x :cite[10]
     """
     config = MODELS_CONFIG
     
-    # Base kwargs for pipeline initialization
+    # Base kwargs for pipeline initialization - ONLY USING VALID PARAMETERS
     kwargs = {
-        # Model directories
+        # Model directories :cite[8]
         "layout_model_dir": config["layout_model_dir"],
         "det_model_dir": config["det_model_dir"], 
         "rec_model_dir": config["rec_model_dir"],
-        "table_model_dir": config["table_model_dir"],
-        "formula_model_dir": config["formula_model_dir"],
-        "kie_model_dir": config["kie_model_dir"],
-        "ser_model_dir": config["ser_model_dir"],
-        "re_model_dir": config["re_model_dir"],
         
-        # Device configuration
+        # Device configuration :cite[10]
         "use_gpu": config["processing_params"]["use_gpu"],
         "enable_mkldnn": config["processing_params"]["enable_mkldnn"],
         "cpu_threads": config["processing_params"]["cpu_threads"],
         
-        # OCR parameters
+        # OCR parameters - ONLY VALID ONES
         "det_limit_side_len": config["processing_params"]["det_limit_side_len"],
         "det_limit_type": config["processing_params"]["det_limit_type"],
         "det_db_thresh": config["processing_params"]["det_db_thresh"],
@@ -107,19 +93,14 @@ def get_structurev3_kwargs():
         "rec_image_shape": config["processing_params"]["rec_image_shape"],
         "rec_batch_num": config["processing_params"]["rec_batch_num"],
         "max_text_length": config["processing_params"]["max_text_length"],
-        "drop_score": config["processing_params"]["drop_score"],
         
         # Table parameters
         "table_max_len": config["processing_params"]["table_max_len"],
         "merge_no_span_structure": config["processing_params"]["merge_no_span_structure"],
         
-        # Layout parameters
+        # Layout parameters :cite[8]
         "layout_score_threshold": config["processing_params"]["layout_score_threshold"],
         "layout_nms_threshold": config["processing_params"]["layout_nms_threshold"],
-        
-        # Recovery parameters
-        "recovery_to_markdown": config["processing_params"]["recovery_to_markdown"],
-        "use_pdf2docx_api": config["processing_params"]["use_pdf2docx_api"],
         
         # Language
         "lang": config["processing_params"]["lang"],
@@ -137,18 +118,20 @@ def get_pipeline_kwargs():
     config = MODELS_CONFIG
     
     kwargs = {
-        # Enable/disable pipeline features
+        # Enable/disable pipeline features :cite[10]
         "layout": config["pipeline_features"]["layout"],
         "table": config["pipeline_features"]["table"],
         "formula": config["pipeline_features"]["formula"], 
         "ocr": config["pipeline_features"]["ocr"],
         "recovery": config["pipeline_features"]["recovery"],
         "kie": config["pipeline_features"]["kie"],
+        "use_doc_orientation_classify": config["pipeline_features"]["use_doc_orientation_classify"],
+        "use_doc_unwarping": config["pipeline_features"]["use_doc_unwarping"],
+        "use_textline_orientation": config["pipeline_features"]["use_textline_orientation"],
         
         # Image preprocessing
         "invert": config["processing_params"]["invert"],
         "binarize": config["processing_params"]["binarize"],
-        "alphacolor": config["processing_params"]["alphacolor"],
     }
     
     return kwargs
