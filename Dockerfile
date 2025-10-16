@@ -26,8 +26,11 @@ WORKDIR /app
 RUN python -m pip install --upgrade pip && \
     pip install "paddlepaddle" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/ && \
     pip install "paddleocr[doc-parser]==3.3.0" && \
-    pip install "fastapi" "uvicorn[standard]" "python-multipart" "pillow"
+    pip install "fastapi==0.114.*" "uvicorn[standard]==0.30.*" "python-multipart==0.0.9" "pillow==10.*"
 
+# Optional CPU threading hints for better throughput on CPU
+ENV OMP_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
 
 # Copy application
 COPY app.py /app/app.py
