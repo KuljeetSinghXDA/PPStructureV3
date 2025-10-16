@@ -72,37 +72,6 @@ def convert_numpy(obj):
         return {k: convert_numpy(v) for k, v in obj.items()}
     return obj
 
-def concatenate_markdown_pages(markdown_infos):
-    """
-    Concatenate Markdown across pages using page_continuation_flags for seamless merging.
-    Assumes each md in markdown_infos is a dict with 'markdown_texts' (str) and 'page_continuation_flags' (tuple of bool: (is_start, is_end)).
-    """
-    full_texts = []
-    carry_over_text = ""
-    for md in markdown_infos:
-        text = md.get('markdown_texts', md.get('text', ''))
-        flags = md.get('page_continuation_flags', (True, True))  # (is_start, is_end)
-        is_start, is_end = flags
-        
-        if carry_over_text:
-            if not is_start:  # Continue from previous page without break
-                text = carry_over_text + text
-            else:
-                full_texts.append(carry_over_text)
-                carry_over_text = ""
-        
-        if is_end:
-            full_texts.append(text)
-            carry_over_text = ""
-        else:
-            carry_over_text = text
-    
-    if carry_over_text:
-        full_texts.append(carry_over_text)
-    
-    # Join pages with page breaks where boundaries exist
-    return '\n\n--- Page Break ---\n\n'.join(full_texts)
-
 @app.post("/parse")
 async def parse_documents(files: List[UploadFile] = File(..., description="Multiple image/PDF files for parsing")):
     """
@@ -152,8 +121,8 @@ async def parse_documents(files: List[UploadFile] = File(..., description="Multi
                 # Collect markdown dict for concatenation
                 markdown_infos.append(res.markdown)
 
-            # Concatenate Markdown for multi-page documents using helper function
-            concatenated_markdown = concatenate_markdown_pages(markdown_infos)
+            # Concatenate Markdown for multi-page documents using pipeline method
+            concatenated_markdown, _ = pipeline.concatenate_markdown_pages(markdown_infos)
 
             results.append({
                 "filename": file.filename,
