@@ -41,7 +41,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Pre-download models (optional - can be done at runtime)
 # This ensures models are cached in the container
-RUN python -c "from paddleocr import PPStructureV3; PPStructureV3(layout_model_name='PP-DocLayout-L', text_detection_model_name='PP-OCRv5_mobile_det', text_recognition_model_name='en_PP-OCRv5_mobile_rec', table_recognition_model_name='SLANet_plus', use_doc_preprocessor=False, use_table_recognition=True, use_formula_recognition=True, use_seal_recognition=True, use_chart_recognition=True).predict('', input_type='img', do_visualize=False)" 2>/dev/null || true
+#RUN python -c "from paddleocr import PPStructureV3; PPStructureV3(layout_model_name='PP-DocLayout-L', text_detection_model_name='PP-OCRv5_mobile_det', text_recognition_model_name='en_PP-OCRv5_mobile_rec', table_recognition_model_name='SLANet_plus', use_doc_preprocessor=False, use_table_recognition=True, use_formula_recognition=True, use_seal_recognition=True, use_chart_recognition=True).predict('', input_type='img', do_visualize=False)" 2>/dev/null || true
 
 # Copy application files
 COPY pp_structure_api.py /app/
