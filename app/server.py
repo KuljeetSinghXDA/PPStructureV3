@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 import numpy as np
 from PIL import Image
+import asyncio  # Add this import for asyncio.Semaphore
 
 # Explicit imports for PaddleOCR components
 ENABLE_HPI = False  # High-performance inference (disable if causing issues)
@@ -169,7 +170,7 @@ async def lifespan(app: FastAPI):
         use_formula_recognition=USE_FORMULA_RECOGNITION,
         use_chart_recognition=USE_CHART_RECOGNITION,
     )
-    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
+    app.state.predict_sem = asyncio.Semaphore(value=MAX_PARALLEL_PREDICT)  # Changed to asyncio.Semaphore
     yield
 
 app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
@@ -184,7 +185,7 @@ async def parse(file: UploadFile = File(...)) -> JSONResponse:
     Parse a document (image/PDF) using PP-StructureV3.
     Returns JSON output directly, plus a Markdown representation.
     """
-    # Acquire semaphore for concurrency control
+    # Acquire semaphore for concurrency control (now async-compatible)
     async with app.state.predict_sem:
         # Validate file type
         if not file.filename:
@@ -211,7 +212,7 @@ async def parse(file: UploadFile = File(...)) -> JSONResponse:
             # Generate Markdown from JSON
             markdown_output = json_to_markdown(pp_result)
             
-            # Return combined JSOn response
+            # Return combined JSON response
             return JSONResponse(content={
                 "json": pp_result,  # Raw PP-StructureV3 output
                 "markdown": markdown_output  # Generated Markdown string
