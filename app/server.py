@@ -73,7 +73,7 @@ FORMULA_RECOGNITION_BATCH_SIZE = None  # Default 1
 TEXTLINE_ORIENTATION_BATCH_SIZE = None  # Default 1
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None  # Default 1
 
-# Additional table-specific params (from PP-StructureV3 doc)
+# Additional table-specific params (from PP-StructureV3 doc) - these are for predict, not init
 USE_WIRED_TABLE_CELLS_TRANS_TO_HTML = None  # Default True if table enabled
 USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML = None  # Default True if table enabled
 USE_TABLE_ORIENTATION_CLASSIFY = None  # Default True if table enabled
@@ -114,7 +114,6 @@ async def lifespan(app: FastAPI):
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
         # OCR
         text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
-        text_detection_model_dir=None,
         text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
         text_det_limit_type=TEXT_DET_LIMIT_TYPE,
         text_det_thresh=TEXT_DET_THRESH,
@@ -131,12 +130,6 @@ async def lifespan(app: FastAPI):
         wireless_table_cells_detection_model_name=WIRELESS_TABLE_CELLS_DETECTION_MODEL_NAME,
         table_orientation_classify_model_name=TABLE_ORIENTATION_CLASSIFY_MODEL_NAME,
         use_table_recognition=USE_TABLE_RECOGNITION,
-        use_wired_table_cells_trans_to_html=USE_WIRED_TABLE_CELLS_TRANS_TO_HTML,
-        use_wireless_table_cells_trans_to_html=USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML,
-        use_table_orientation_classify=USE_TABLE_ORIENTATION_CLASSIFY,
-        use_ocr_results_with_table_cells=USE_OCR_RESULTS_WITH_TABLE_CELLS,
-        use_e2e_wired_table_rec_model=USE_E2E_WIRED_TABLE_REC_MODEL,
-        use_e2e_wireless_table_rec_model=USE_E2E_WIRELESS_TABLE_REC_MODEL,
         # Formula
         formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
         formula_recognition_batch_size=FORMULA_RECOGNITION_BATCH_SIZE,
