@@ -35,7 +35,7 @@ USE_CHART_RECOGNITION = False         # disabled by default (enable for document
 USE_SEAL_RECOGNITION = True           # enable seal (stamp) text recognition
 
 # Model overrides (using default models or specified ones)
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
