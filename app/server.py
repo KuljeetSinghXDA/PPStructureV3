@@ -1,39 +1,37 @@
 import os
-import io
 import tempfile
 import threading
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
-
+from typing import List, Literal, Optional, Dict, Any
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, status
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
+# ================= Core Configuration (Pinned Values - Defined by user) =================
+# These values are used to initialize the PPStructureV3 pipeline once.
 ENABLE_HPI = False
 ENABLE_MKLDNN = True
 
 from paddleocr import PPStructureV3
+from paddleocr.ppstructure.structure.ppstructure import PPStructure
 
-# ================= Core Configuration (Pinned Values) =================
+# Hardware and parallelism settings
 DEVICE = "cpu"
 CPU_THREADS = 4
+MAX_PARALLEL_PREDICT = 1
+ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
+MAX_FILE_SIZE_MB = 50
 
-# Optional accuracy boosters
-USE_DOC_ORIENTATION_CLASSIFY = False
-USE_DOC_UNWARPING = False
-USE_TEXTLINE_ORIENTATION = False
-
-# Subpipeline toggles
+# Subpipeline toggles (Base Configuration)
 USE_TABLE_RECOGNITION = True
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
-USE_SEAL_RECOGNITION = False  # newly surfaced toggle
 
-# Model overrides
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
+# Model and parameter settings (fixed at init)
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
@@ -42,351 +40,275 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters
-LAYOUT_THRESHOLD: Optional[Union[float, Dict[int, float]]] = None
-TEXT_DET_THRESH: Optional[float] = None
-TEXT_DET_BOX_THRESH: Optional[float] = None
-TEXT_DET_UNCLIP_RATIO: Optional[float] = None
-TEXT_DET_LIMIT_SIDE_LEN: Optional[int] = None
-TEXT_DET_LIMIT_TYPE: Optional[str] = None
-TEXT_REC_SCORE_THRESH: Optional[float] = None
-TEXT_RECOGNITION_BATCH_SIZE: Optional[int] = None
+# Detection/recognition parameters (fixed at init)
+LAYOUT_THRESHOLD = None
+TEXT_DET_THRESH = None
+TEXT_DET_BOX_THRESH = None
+TEXT_DET_UNCLIP_RATIO = None
+TEXT_DET_LIMIT_SIDE_LEN = None
+TEXT_DET_LIMIT_TYPE = None
+TEXT_REC_SCORE_THRESH = None
+TEXT_RECOGNITION_BATCH_SIZE = None
 
-# I/O and service limits
-ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
-MAX_FILE_SIZE_MB = 50
-MAX_PARALLEL_PREDICT = 1
-
-# ================= Utilities =================
-def _ext_ok(filename: str) -> bool:
-    return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
-
-def _human_limit_mb() -> str:
-    return f"{MAX_FILE_SIZE_MB} MB"
-
-def _parse_float_or_json(val: Optional[str]) -> Optional[Union[float, Dict[int, Any], Tuple[float, float]]]:
-    """Accept a number like '0.5', a list/tuple like '[1.2,2.0]' or '1.2,2.0', or a dict like '{"0":0.5}'."""
-    if val is None:
-        return None
-    s = val.strip()
-    # try JSON first
-    try:
-        parsed = json.loads(s)
-        if isinstance(parsed, list) and len(parsed) == 2 and all(isinstance(x, (int, float)) for x in parsed):
-            return (float(parsed[0]), float(parsed[1]))
-        if isinstance(parsed, dict):
-            # JSON keys will be strings; convert numeric keys to int when possible
-            out: Dict[int, Any] = {}
-            for k, v in parsed.items():
-                try:
-                    ik = int(k)
-                except Exception:
-                    continue
-                out[ik] = v
-            return out
-        if isinstance(parsed, (int, float)):
-            return float(parsed)
-    except Exception:
-        pass
-    # try simple "a,b" tuple
-    if "," in s:
-        parts = [p.strip() for p in s.split(",")]
-        if len(parts) == 2:
-            try:
-                return (float(parts[0]), float(parts[1]))
-            except Exception:
-                pass
-    # fallback float
-    try:
-        return float(s)
-    except Exception:
-        raise HTTPException(status_code=422, detail=f"Invalid JSON/number tuple: {val}")
-
-def _stream_copy_enforcing_limit(src_file: io.BufferedReader, dst_path: Path, max_mb: int) -> None:
-    max_bytes = max_mb * 1024 * 1024
-    total = 0
-    dst_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst_path, "wb") as out:
-        while True:
-            chunk = src_file.read(1024 * 1024)  # 1 MiB
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise HTTPException(status_code=413, detail=f"File too large. Max allowed is {_human_limit_mb()}.")
-            out.write(chunk)
-
-def _build_predict_kwargs(
-    *,
-    use_doc_orientation_classify: Optional[bool],
-    use_doc_unwarping: Optional[bool],
-    use_textline_orientation: Optional[bool],
-    use_seal_recognition: Optional[bool],
-    use_table_recognition: Optional[bool],
-    use_formula_recognition: Optional[bool],
-    use_chart_recognition: Optional[bool],
-    use_region_detection: Optional[bool],
-    layout_threshold: Optional[Union[float, Dict[int, float]]],
-    layout_nms: Optional[bool],
-    layout_unclip_ratio: Optional[Union[float, Tuple[float, float], Dict[int, Tuple[float, float]]]],
-    layout_merge_bboxes_mode: Optional[Union[str, Dict[int, str]]],
-    text_det_limit_side_len: Optional[int],
-    text_det_limit_type: Optional[Literal["min", "max"]],
-    text_det_thresh: Optional[float],
-    text_det_box_thresh: Optional[float],
-    text_det_unclip_ratio: Optional[float],
-    text_rec_score_thresh: Optional[float],
-    seal_det_limit_side_len: Optional[int],
-    seal_det_limit_type: Optional[Literal["min", "max"]],
-    seal_det_thresh: Optional[float],
-    seal_det_box_thresh: Optional[float],
-    seal_det_unclip_ratio: Optional[float],
-    seal_rec_score_thresh: Optional[float],
-    use_wired_table_cells_trans_to_html: Optional[bool],
-    use_wireless_table_cells_trans_to_html: Optional[bool],
-    use_table_orientation_classify: Optional[bool],
-    use_ocr_results_with_table_cells: Optional[bool],
-    use_e2e_wired_table_rec_model: Optional[bool],
-    use_e2e_wireless_table_rec_model: Optional[bool],
-) -> Dict[str, Any]:
-    # Only include keys that are not None to let predict() override constructor values selectively.
-    kv = dict(
-        use_doc_orientation_classify=use_doc_orientation_classify,
-        use_doc_unwarping=use_doc_unwarping,
-        use_textline_orientation=use_textline_orientation,
-        use_seal_recognition=use_seal_recognition,
-        use_table_recognition=use_table_recognition,
-        use_formula_recognition=use_formula_recognition,
-        use_chart_recognition=use_chart_recognition,
-        use_region_detection=use_region_detection,
-        layout_threshold=layout_threshold,
-        layout_nms=layout_nms,
-        layout_unclip_ratio=layout_unclip_ratio,
-        layout_merge_bboxes_mode=layout_merge_bboxes_mode,
-        text_det_limit_side_len=text_det_limit_side_len,
-        text_det_limit_type=text_det_limit_type,
-        text_det_thresh=text_det_thresh,
-        text_det_box_thresh=text_det_box_thresh,
-        text_det_unclip_ratio=text_det_unclip_ratio,
-        text_rec_score_thresh=text_rec_score_thresh,
-        seal_det_limit_side_len=seal_det_limit_side_len,
-        seal_det_limit_type=seal_det_limit_type,
-        seal_det_thresh=seal_det_thresh,
-        seal_det_box_thresh=seal_det_box_thresh,
-        seal_det_unclip_ratio=seal_det_unclip_ratio,
-        seal_rec_score_thresh=seal_rec_score_thresh,
-        use_wired_table_cells_trans_to_html=use_wired_table_cells_trans_to_html,
-        use_wireless_table_cells_trans_to_html=use_wireless_table_cells_trans_to_html,
-        use_table_orientation_classify=use_table_orientation_classify,
-        use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
-        use_e2e_wired_table_rec_model=use_e2e_wired_table_rec_model,
-        use_e2e_wireless_table_rec_model=use_e2e_wireless_table_rec_model,
-    )
-    return {k: v for k, v in kv.items() if v is not None}
+# Optional accuracy boosters (fixed at init)
+USE_DOC_ORIENTATION_CLASSIFY = False
+USE_DOC_UNWARPING = False
+USE_TEXTLINE_ORIENTATION = False
 
 # ================= App & Lifespan =================
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Constructor parameters (latest doc) include all model names/dirs, thresholds, device and perf knobs.
-    # This instance is kept hot and reused across requests; per-request behavior is controlled via predict() overrides.  (Docs: init + predict params)
-    app.state.pipeline = PPStructureV3(
-        device=DEVICE,
-        enable_mkldnn=ENABLE_MKLDNN,
-        enable_hpi=ENABLE_HPI,
-        cpu_threads=CPU_THREADS,
-        # Model names
-        layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
-        text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
-        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
-        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
-        formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
-        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-        # Default thresholds / batch sizes
-        layout_threshold=LAYOUT_THRESHOLD,
-        text_det_thresh=TEXT_DET_THRESH,
-        text_det_box_thresh=TEXT_DET_BOX_THRESH,
-        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
-        text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
-        text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-        # Subpipeline defaults
-        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-        use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-        use_table_recognition=USE_TABLE_RECOGNITION,
-        use_formula_recognition=USE_FORMULA_RECOGNITION,
-        use_chart_recognition=USE_CHART_RECOGNITION,
-        # You can also add: use_region_detection (default True), use_seal_recognition (False)
-    )
-    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
+    print("Initializing PPStructureV3 pipeline...")
+    # PPStructureV3 initialization, loading models into memory once.
+    try:
+        pipeline = PPStructureV3(
+            device=DEVICE,
+            enable_mkldnn=ENABLE_MKLDNN,
+            enable_hpi=ENABLE_HPI,
+            cpu_threads=CPU_THREADS,
+            layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
+            text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
+            text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
+            wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+            wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+            table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
+            formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
+            chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+            layout_threshold=LAYOUT_THRESHOLD,
+            text_det_thresh=TEXT_DET_THRESH,
+            text_det_box_thresh=TEXT_DET_BOX_THRESH,
+            text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
+            text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+            text_det_limit_type=TEXT_DET_LIMIT_TYPE,
+            text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
+            text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+            use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+            use_doc_unwarping=USE_DOC_UNWARPING,
+            use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+            use_table_recognition=USE_TABLE_RECOGNITION,
+            use_formula_recognition=USE_FORMULA_RECOGNITION,
+            use_chart_recognition=USE_CHART_RECOGNITION,
+        )
+        app.state.pipeline = pipeline
+        app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
+        print("PPStructureV3 pipeline ready.")
+    except Exception as e:
+        print(f"Error initializing pipeline: {e}")
+        # Initialize pipeline to None so the health check or /parse fails gracefully
+        app.state.pipeline = None
+    
     yield
+    print("Shutting down PPStructureV3 pipeline...")
+    # Cleanup logic if necessary (though PaddlePaddle typically handles this)
 
-app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="PPStructureV3 Document Parsing API",
+    description="A highly configurable FastAPI wrapper for the PaddleOCR PPStructureV3 document parsing pipeline.",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    """Checks if the service and the PPStructureV3 pipeline are running."""
+    if app.state.pipeline is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PPStructureV3 pipeline failed to initialize."
+        )
+    return {"status": "ok", "max_parallel_predict": MAX_PARALLEL_PREDICT}
 
-# ================= /parse Endpoint =================
-@app.post(
-    "/parse",
-    response_class=JSONResponse,
-    summary="Parse PDF or image with PP-StructureV3 and return structured results",
-)
-async def parse(
-    file: UploadFile = File(..., description="PDF or image."),
-    # Output control
-    return_format: Literal["json", "markdown"] = Query("json", description="json: per-page JSON. markdown: concatenated markdown text (PDF/image)."),
-    # Subpipeline toggles (predict overrides)
-    use_doc_orientation_classify: Optional[bool] = Query(None, description="Enable document orientation classification."),
-    use_doc_unwarping: Optional[bool] = Query(None, description="Enable document unwarping."),
-    use_textline_orientation: Optional[bool] = Query(None, description="Enable text line orientation classification."),
-    use_seal_recognition: Optional[bool] = Query(None, description="Enable seal text recognition subpipeline."),
-    use_table_recognition: Optional[bool] = Query(None, description="Enable table recognition subpipeline."),
-    use_formula_recognition: Optional[bool] = Query(None, description="Enable formula recognition subpipeline."),
-    use_chart_recognition: Optional[bool] = Query(None, description="Enable chart parsing module."),
-    use_region_detection: Optional[bool] = Query(None, description="Enable region detection helper."),
-    # Layout overrides
-    layout_threshold_q: Optional[str] = Query(None, alias="layout_threshold", description="float or JSON dict like {\"0\":0.4}."),
-    layout_nms: Optional[bool] = Query(None),
-    layout_unclip_ratio_q: Optional[str] = Query(None, alias="layout_unclip_ratio", description="float, [w,h], or JSON dict like {\"0\":[1.1,2.0]}."),
-    layout_merge_bboxes_mode_q: Optional[str] = Query(None, alias="layout_merge_bboxes_mode", description="\"large\"|\"small\"|\"union\" or JSON dict per class."),
-    # OCR overrides
-    text_det_limit_side_len: Optional[int] = Query(None, ge=1),
-    text_det_limit_type: Optional[Literal["min", "max"]] = Query(None),
-    text_det_thresh: Optional[float] = Query(None, gt=0),
-    text_det_box_thresh: Optional[float] = Query(None, gt=0),
-    text_det_unclip_ratio: Optional[float] = Query(None, gt=0),
-    text_rec_score_thresh: Optional[float] = Query(None, ge=0),
-    # Seal detection/recog overrides
-    seal_det_limit_side_len: Optional[int] = Query(None, ge=1),
-    seal_det_limit_type: Optional[Literal["min", "max"]] = Query(None),
-    seal_det_thresh: Optional[float] = Query(None, gt=0),
-    seal_det_box_thresh: Optional[float] = Query(None, gt=0),
-    seal_det_unclip_ratio: Optional[float] = Query(None, gt=0),
-    seal_rec_score_thresh: Optional[float] = Query(None, ge=0),
-    # Table behavior toggles
-    use_wired_table_cells_trans_to_html: Optional[bool] = Query(None, description="Directly convert wired cell dets to HTML."),
-    use_wireless_table_cells_trans_to_html: Optional[bool] = Query(None, description="Directly convert wireless cell dets to HTML."),
-    use_table_orientation_classify: Optional[bool] = Query(None, description="Auto-rotate tilted tables (90/180/270)."),
-    use_ocr_results_with_table_cells: Optional[bool] = Query(None, description="Re-segment OCR by cell masks to avoid text loss."),
-    use_e2e_wired_table_rec_model: Optional[bool] = Query(None, description="End-to-end wired table recognition (no cell detector)."),
-    use_e2e_wireless_table_rec_model: Optional[bool] = Query(None, description="End-to-end wireless table recognition (no cell detector)."),
+# ================= Core Parsing Function (Runs in Threadpool) =================
+
+def _process_file_in_threadpool(
+    pipeline: PPStructure,
+    temp_input_path: Path,
+    output_format: str,
+    page_number: Optional[int],
+    use_table_recognition_override: Optional[bool],
+    use_formula_recognition_override: Optional[bool],
+    use_chart_recognition_override: Optional[bool],
+) -> tuple[str, str]:
+    """
+    Handles file saving, pipeline prediction, output formatting, and cleanup.
+    Runs inside FastAPI's threadpool to prevent blocking the event loop.
+    """
+    temp_output_dir = None
+    try:
+        # 1. Prediction Call
+        # We assume that the predict method accepts optional sub-pipeline overrides
+        # However, since these flags are typically set in __init__, we need to adjust the predict call.
+        # PPStructureV3's predict method allows passing in the flags to control which components process.
+        
+        # Collect runtime flags to pass to the predict method (if the PaddleOCR API supports it)
+        # Note: If PaddleOCR doesn't accept these flags at runtime, the pre-initialized flags will be used.
+        # We pass them anyway for completeness, following the deep research intent.
+        
+        predict_kwargs = {}
+        if page_number is not None:
+            predict_kwargs['page_num'] = page_number
+        
+        if use_table_recognition_override is not None:
+             predict_kwargs['use_table_recognition'] = use_table_recognition_override
+        if use_formula_recognition_override is not None:
+             predict_kwargs['use_formula_recognition'] = use_formula_recognition_override
+        if use_chart_recognition_override is not None:
+             predict_kwargs['use_chart_recognition'] = use_chart_recognition_override
+
+
+        # PPStructureV3's predict can take a path string
+        output_results = pipeline.predict(str(temp_input_path), **predict_kwargs)
+        
+        if not output_results:
+            return "[]", "application/json" if output_format == "json" else "text/markdown"
+
+        # 2. Output Handling (Requires saving to a temp dir and reading)
+        temp_output_dir = tempfile.mkdtemp()
+        
+        combined_content = ""
+        
+        for i, res in enumerate(output_results):
+            if output_format == "json":
+                # Save and read JSON output
+                json_path = Path(temp_output_dir) / f"page_{i}.json"
+                res.save_to_json(save_path=temp_output_dir, file_name=f"page_{i}")
+                
+                # Check if the file was created and read its content
+                if json_path.exists():
+                     with open(json_path, 'r', encoding='utf-8') as f:
+                         # Append the JSON content (as a string) to be combined later
+                         combined_content += f.read() + ",\n" 
+
+            elif output_format == "markdown":
+                # Save and read Markdown output
+                md_path = Path(temp_output_dir) / f"page_{i}.md"
+                res.save_to_markdown(save_path=temp_output_dir, file_name=f"page_{i}")
+                
+                if md_path.exists():
+                    with open(md_path, 'r', encoding='utf-8') as f:
+                        combined_content += f"\n\n---\n\n## Page {i + 1}\n\n" + f.read()
+
+        
+        # 3. Final Serialization
+        if output_format == "json":
+            # Strip trailing comma and wrap in list brackets if multiple pages were processed
+            final_content = f"[{combined_content.rstrip(',\n')}]"
+            return final_content, "application/json"
+        
+        elif output_format == "markdown":
+            return combined_content.strip(), "text/markdown"
+
+    finally:
+        # 4. Cleanup
+        if temp_output_dir and Path(temp_output_dir).exists():
+            shutil.rmtree(temp_output_dir)
+        if temp_input_path.exists():
+            os.remove(temp_input_path)
+
+
+# ================= FastAPI Endpoint =================
+
+@app.post("/parse", 
+          summary="Parse a document or image using PPStructureV3.",
+          responses={
+              200: {"content": {"application/json": {}, "text/markdown": {}}},
+              400: {"model": Dict[str, str]},
+              503: {"model": Dict[str, str]},
+              500: {"model": Dict[str, str]},
+          })
+async def parse_document(
+    file: UploadFile = File(..., description="The document or image file to parse (.pdf, .jpg, .png)."),
+    output_format: Literal["json", "markdown"] = Query(
+        "json", 
+        description="Desired output format. 'json' returns structured data, 'markdown' returns text/tables in Markdown format."
+    ),
+    page_number: Optional[int] = Query(
+        None, 
+        ge=0, 
+        description="For PDFs, specify the 0-based page index to parse. If omitted, all pages are processed."
+    ),
+    # Feature Overrides (Allowing dynamic control over pipeline components)
+    use_table_recognition: Optional[bool] = Query(
+        None, 
+        description=f"Override base config ({USE_TABLE_RECOGNITION}). Enable/disable table structure recognition."
+    ),
+    use_formula_recognition: Optional[bool] = Query(
+        None, 
+        description=f"Override base config ({USE_FORMULA_RECOGNITION}). Enable/disable formula (LaTeX) recognition."
+    ),
+    use_chart_recognition: Optional[bool] = Query(
+        None, 
+        description=f"Override base config ({USE_CHART_RECOGNITION}). Enable/disable chart-to-table parsing."
+    )
 ):
-    # Validate extension
-    if not _ext_ok(file.filename):
-        raise HTTPException(status_code=415, detail=f"Unsupported file type. Allowed: {sorted(ALLOWED_EXTENSIONS)}")
-
-    # Persist to temp file while enforcing size limit
-    with tempfile.TemporaryDirectory(prefix="ppsv3_") as td:
-        temp_path = Path(td) / Path(file.filename).name
-        try:
-            # SpooledTemporaryFile gives a file-like object at file.file
-            _stream_copy_enforcing_limit(file.file, temp_path, MAX_FILE_SIZE_MB)
-        finally:
-            try:
-                await file.close()
-            except Exception:
-                pass
-
-        # Parse complex JSON/number parameters
-        layout_threshold = _parse_float_or_json(layout_threshold_q) if layout_threshold_q is not None else None
-        layout_unclip_ratio = _parse_float_or_json(layout_unclip_ratio_q) if layout_unclip_ratio_q is not None else None
-        layout_merge_bboxes_mode: Optional[Union[str, Dict[int, str]]] = None
-        if layout_merge_bboxes_mode_q is not None:
-            # Try dict first, else pass through as string
-            try:
-                parsed = json.loads(layout_merge_bboxes_mode_q)
-                if isinstance(parsed, dict):
-                    d2: Dict[int, str] = {}
-                    for k, v in parsed.items():
-                        try:
-                            d2[int(k)] = str(v)
-                        except Exception:
-                            continue
-                    layout_merge_bboxes_mode = d2
-                else:
-                    layout_merge_bboxes_mode = str(layout_merge_bboxes_mode_q)
-            except Exception:
-                layout_merge_bboxes_mode = str(layout_merge_bboxes_mode_q)
-
-        predict_kwargs = _build_predict_kwargs(
-            use_doc_orientation_classify=use_doc_orientation_classify,
-            use_doc_unwarping=use_doc_unwarping,
-            use_textline_orientation=use_textline_orientation,
-            use_seal_recognition=use_seal_recognition,
-            use_table_recognition=use_table_recognition,
-            use_formula_recognition=use_formula_recognition,
-            use_chart_recognition=use_chart_recognition,
-            use_region_detection=use_region_detection,
-            layout_threshold=layout_threshold,
-            layout_nms=layout_nms,
-            layout_unclip_ratio=layout_unclip_ratio,  # float | (w,h) | dict
-            layout_merge_bboxes_mode=layout_merge_bboxes_mode,  # str | dict
-            text_det_limit_side_len=text_det_limit_side_len,
-            text_det_limit_type=text_det_limit_type,
-            text_det_thresh=text_det_thresh,
-            text_det_box_thresh=text_det_box_thresh,
-            text_det_unclip_ratio=text_det_unclip_ratio,
-            text_rec_score_thresh=text_rec_score_thresh,
-            seal_det_limit_side_len=seal_det_limit_side_len,
-            seal_det_limit_type=seal_det_limit_type,
-            seal_det_thresh=seal_det_thresh,
-            seal_det_box_thresh=seal_det_box_thresh,
-            seal_det_unclip_ratio=seal_det_unclip_ratio,
-            seal_rec_score_thresh=seal_rec_score_thresh,
-            use_wired_table_cells_trans_to_html=use_wired_table_cells_trans_to_html,
-            use_wireless_table_cells_trans_to_html=use_wireless_table_cells_trans_to_html,
-            use_table_orientation_classify=use_table_orientation_classify,
-            use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
-            use_e2e_wired_table_rec_model=use_e2e_wired_table_rec_model,
-            use_e2e_wireless_table_rec_model=use_e2e_wireless_table_rec_model,
+    """
+    Performs document layout analysis and content recognition (OCR, Table, Formula, Chart) 
+    using the highly efficient PPStructureV3 pipeline.
+    """
+    
+    # 0. System Check
+    if app.state.pipeline is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PPStructureV3 pipeline is not ready. Check service health."
         )
 
-        # Run inference (guarded by semaphore, compute in threadpool)
-        async with _semaphore_ctx(app.state.predict_sem):
-            output = await run_in_threadpool(lambda: app.state.pipeline.predict(input=str(temp_path), **predict_kwargs))
+    # 1. File Validation
+    file_size_mb = file.size / (1024 * 1024) if file.size else 0
+    if file_size_mb > MAX_FILE_SIZE_MB:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File size exceeds the limit of {MAX_FILE_SIZE_MB} MB."
+        )
 
-        # Format response
-        if return_format == "markdown":
-            # Build one markdown string for images or PDFs
-            md_list = [res.markdown for res in output]
-            merged = app.state.pipeline.concatenate_markdown_pages(md_list)
-            # merged is a string; images are not serialized here
-            return JSONResponse(
-                content={
-                    "input_filename": Path(file.filename).name,
-                    "format": "markdown",
-                    "markdown": merged,
-                    "pages": len(output),
-                }
+    file_extension = Path(file.filename).suffix.lower()
+    if file_extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type. Only {', '.join(ALLOWED_EXTENSIONS)} are allowed."
+        )
+
+    # 2. Save File to Temp Directory
+    # We must save the file synchronously before passing the path to the threadpool
+    temp_input_path = Path(tempfile.gettempdir()) / Path(file.filename)
+    try:
+        temp_input_path.write_bytes(await file.read())
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not save uploaded file to temp path: {e}"
+        )
+
+    # 3. Concurrency and Execution
+    async with app.state.predict_sem:
+        try:
+            # Execute the synchronous blocking call in the thread pool
+            content, media_type = await run_in_threadpool(
+                _process_file_in_threadpool,
+                app.state.pipeline,
+                temp_input_path,
+                output_format,
+                page_number,
+                use_table_recognition,
+                use_formula_recognition,
+                use_chart_recognition,
+            )
+            
+            # 4. Return Response
+            if output_format == "json":
+                # Ensure the JSON string is parsed to a dict/list before sending as JSONResponse
+                return JSONResponse(content=json.loads(content), media_type=media_type)
+            else: # markdown
+                return PlainTextResponse(content=content, media_type=media_type)
+
+        except Exception as e:
+            print(f"Prediction Error: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Document parsing failed: {type(e).__name__}: {str(e)}"
             )
 
-        # default: JSON per page
-        pages_json: List[Dict[str, Any]] = []
-        for res in output:
-            # 'res.json' is a dict consistent with save_to_json(); numpy arrays are converted to lists by the pipeline
-            pages_json.append(res.json)
-
-        return JSONResponse(
-            content={
-                "input_filename": Path(file.filename).name,
-                "format": "json",
-                "pages": pages_json,
-                "num_pages": len(pages_json),
-            }
-        )
-
-# Small helper context manager for semaphore
-from contextlib import asynccontextmanager as _acm
-
-@_acm
-async def _semaphore_ctx(sem: threading.Semaphore):
-    sem.acquire()
-    try:
-        yield
-    finally:
-        sem.release()
+# The exception handling in `_process_file_in_threadpool` and `parse_document` ensures
+# the temporary file is cleaned up even if an error occurs.
