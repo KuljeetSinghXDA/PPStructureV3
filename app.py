@@ -29,7 +29,7 @@ TEXT_DET_THRESH = 0.3  # Default; pixel threshold for sensitive text detection
 TEXT_DET_BOX_THRESH = 0.5  # Slightly lower than default (0.6) for more precise boxes in dense areas
 TEXT_REC_SCORE_THRESH = 0.7  # Higher than default (0.0) for precision on medical terms
 TEXT_DET_LIMIT_SIDE_LEN = 1280  # Higher than default (960) for high-res scans
-TEXT_DET_UNCLIP_RATIO = 1.5  # Default; expands regions for full words
+TEXT_DET_UNCLIP_RATIO = 2.0  # Default; expands regions for full words
 LAYOUT_UNCLIP_RATIO = 1.5  # Slightly higher than default (1.0) for better layout coverage
 LAYOUT_NMS = True  # Default non-max suppression
 DEVICE = "cpu"  # For ARM64 CPU
@@ -61,27 +61,6 @@ pipeline = PPStructureV3(
     lang="en",  # English for medical reports
     ocr_version="PP-OCRv5"  # Matches specified models
 )
-
-def concatenate_markdown_pages(markdown_pages):
-    """
-    Simple concatenation of Markdown pages using continuation flags.
-    Assumes markdown_pages is list of dicts with 'markdown_texts' (list of str) and 'page_continuation_flags' (tuple of bools).
-    Merges texts across pages if not ending a segment.
-    """
-    full_markdown = []
-    carry_over = ""
-    for md in markdown_pages:
-        texts = md.get('markdown_texts', [])
-        flags = md.get('page_continuation_flags', [])
-        page_text = carry_over
-        for i, text in enumerate(texts):
-            if i > 0 or (flags and flags[i] and flags[i-1]):  # Simplified: join if not full boundary
-                page_text += "\n\n" + text
-            else:
-                page_text += text
-        full_markdown.append(page_text)
-        carry_over = ""  # Reset or handle based on last flag if needed
-    return "\n\n---\n\n".join(full_markdown)  # Separate pages with divider
 
 @app.post("/parse")
 async def parse_documents(files: List[UploadFile] = File(..., description="Multiple image/PDF files for parsing")):
@@ -125,7 +104,7 @@ async def parse_documents(files: List[UploadFile] = File(..., description="Multi
             page_jsons = []
             markdown_infos = []
             for res in output:
-                # res is the JSON dict; recursively convert any numpy (e.g., boxes, polys) to lists
+                # res.json is the JSON dict; recursively convert any numpy (e.g., boxes, polys) to lists
                 def convert_numpy(obj):
                     if hasattr(obj, 'tolist'):
                         return obj.tolist()
@@ -134,15 +113,14 @@ async def parse_documents(files: List[UploadFile] = File(..., description="Multi
                     elif isinstance(obj, dict):
                         return {k: convert_numpy(v) for k, v in obj.items()}
                     return obj
-                page_json = convert_numpy(res)
+                page_json = convert_numpy(res.json)
                 page_jsons.append(page_json)
 
-                # Markdown: assume res['markdown'] or res.markdown; here using dict
-                md_info = res.get('markdown', {})
-                markdown_infos.append(md_info)
+                # Collect markdown dict for concatenation
+                markdown_infos.append(res.markdown)
 
-            # Concatenate Markdown for multi-page documents using helper
-            concatenated_markdown = concatenate_markdown_pages(markdown_infos)
+            # Concatenate Markdown for multi-page documents using pipeline method
+            concatenated_markdown = pipeline.concatenate_markdown_pages(markdown_infos)
 
             results.append({
                 "filename": file.filename,
