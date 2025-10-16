@@ -1,45 +1,33 @@
+# syntax=docker/dockerfile:1
 FROM python:3.13-slim
 
-# Set working directory
-WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    # Paddle runs best with these envs on CPU
+    OMP_NUM_THREADS=8 \
+    MKL_NUM_THREADS=8
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgomp1 \
-    wget \
+# System deps required by wheels like opencv-headless/PDF/image libs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libgl1 libgomp1 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN useradd --create-home --shell /bin/bash app \
-    && chown -R app:app /app
-USER app
+# 1) Install PaddlePaddle CPU wheel (3.0.0) from official index
+#    (PaddleOCR 3.2.0 is compatible; this index hosts manylinux wheels)
+#    See official install guide. 
+#    https://www.paddleocr.ai/main/en/version3.x/installation.html
+RUN python -m pip install --upgrade pip \
+ && python -m pip install "paddlepaddle==3.0.0" -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
 
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-ENV PADDLE_PDX_MODEL_SOURCE=huggingface
-ENV PATH=/home/app/.local/bin:$PATH
+# 2) Install PaddleOCR 3.2.0 with doc-parser extras and API server deps
+RUN python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi==0.115.5 uvicorn[standard]==0.32.0
 
-# Copy requirements and install Python dependencies
-COPY --chown=app:app requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+# Copy app
+WORKDIR /app
+COPY app.py /app/app.py
 
-# Copy application code
-COPY --chown=app:app . .
-
-# Create necessary directories
-RUN mkdir -p /app/uploads /app/output /app/temp
-
-# Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-
-# Run the application
-CMD ["python", "main.py"]
+# Default command: one worker is fine; increase if CPU-bound concurrency needed
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
