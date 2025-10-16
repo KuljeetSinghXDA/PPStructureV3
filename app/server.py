@@ -39,8 +39,8 @@ USE_CHART_RECOGNITION = True
 # Layout detection
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 # OCR models (PP-OCRv5 family; server variants favor accuracy vs mobile for speed)
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_server_det"
-TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_server_rec"
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
+TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 # Table structure (wired/wireless)
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
