@@ -9,8 +9,7 @@ import json
 from paddleocr import PPStructureV3
 
 # ------------------------------------------------------------------------------------
-# Configuration: all models, parameters, and toggles live here.
-# Edit only this section to change models/behavior as required.
+# Configuration: edit only this section to change models/behavior as required.
 # ------------------------------------------------------------------------------------
 
 @dataclass
@@ -44,7 +43,8 @@ class PPStructureV3Config:
     use_seal_recognition: bool = False
     use_table_recognition: bool = True
     use_formula_recognition: bool = True
-    use_chart_recognition: bool = False            # disabled to avoid optional VLM init
+    use_chart_recognition: bool = False            # disable chart VLM
+    use_chart_parsing: bool = False                # compatibility flag in some 3.x configs
     use_region_detection: bool = True
 
     # Detection params
@@ -111,12 +111,18 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
         mkldnn_cache_capacity=cfg.mkldnn_cache_capacity,
         cpu_threads=cfg.cpu_threads,
         lang=cfg.lang,
+
+        # core models
         layout_detection_model_name=cfg.layout_detection_model_name,
         text_detection_model_name=cfg.text_detection_model_name,
         text_recognition_model_name=cfg.text_recognition_model_name,
+
+        # optional local dirs
         layout_detection_model_dir=cfg.layout_detection_model_dir,
         text_detection_model_dir=cfg.text_detection_model_dir,
         text_recognition_model_dir=cfg.text_recognition_model_dir,
+
+        # toggles
         use_doc_orientation_classify=cfg.use_doc_orientation_classify,
         use_doc_unwarping=cfg.use_doc_unwarping,
         use_textline_orientation=cfg.use_textline_orientation,
@@ -124,18 +130,27 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
         use_table_recognition=cfg.use_table_recognition,
         use_formula_recognition=cfg.use_formula_recognition,
         use_chart_recognition=cfg.use_chart_recognition,
+        use_chart_parsing=cfg.use_chart_parsing,  # compatibility for some 3.x variants
         use_region_detection=cfg.use_region_detection,
+
+        # det params
         text_det_limit_side_len=cfg.text_det_limit_side_len,
         text_det_limit_type=cfg.text_det_limit_type,
         text_det_thresh=cfg.text_det_thresh,
         text_det_box_thresh=cfg.text_det_box_thresh,
         text_det_unclip_ratio=cfg.text_det_unclip_ratio,
+
+        # layout params
         layout_threshold=cfg.layout_threshold,
         layout_nms=cfg.layout_nms,
         layout_unclip_ratio=cfg.layout_unclip_ratio,
         layout_merge_bboxes_mode=cfg.layout_merge_bboxes_mode,
+
+        # batching
         text_recognition_batch_size=cfg.text_recognition_batch_size,
         text_rec_score_thresh=cfg.text_rec_score_thresh,
+
+        # optional module overrides
         table_classification_model_name=cfg.table_classification_model_name,
         table_classification_model_dir=cfg.table_classification_model_dir,
         wired_table_structure_recognition_model_name=cfg.wired_table_structure_recognition_model_name,
@@ -148,9 +163,11 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
         wireless_table_cells_detection_model_dir=cfg.wireless_table_cells_detection_model_dir,
         table_orientation_classify_model_name=cfg.table_orientation_classify_model_name,
         table_orientation_classify_model_dir=cfg.table_orientation_classify_model_dir,
+
         formula_recognition_model_name=cfg.formula_recognition_model_name,
         formula_recognition_model_dir=cfg.formula_recognition_model_dir,
         formula_recognition_batch_size=cfg.formula_recognition_batch_size,
+
         seal_text_detection_model_name=cfg.seal_text_detection_model_name,
         seal_text_detection_model_dir=cfg.seal_text_detection_model_dir,
         seal_det_limit_side_len=cfg.seal_det_limit_side_len,
@@ -162,43 +179,37 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
         seal_text_recognition_model_dir=cfg.seal_text_recognition_model_dir,
         seal_text_recognition_batch_size=cfg.seal_text_recognition_batch_size,
         seal_rec_score_thresh=cfg.seal_rec_score_thresh,
+
         chart_recognition_model_name=cfg.chart_recognition_model_name,
         chart_recognition_model_dir=cfg.chart_recognition_model_dir,
         chart_recognition_batch_size=cfg.chart_recognition_batch_size,
     )
+    # Drop only keys whose value is None
     return PPStructureV3(**{k: v for k, v in kwargs.items() if v is not None})
 
 # Instantiate configuration and set CPU threading env before pipeline init
 CONFIG = PPStructureV3Config()
 PIPELINE = build_pipeline(CONFIG)
 
-app = FastAPI(title="PP-StructureV3 Parser", version="1.1.0")
+app = FastAPI(title="PP-StructureV3 Parser", version="1.2.0")
 
 def _save_and_collect_outputs(res_list, work_dir: str) -> List[Dict[str, Any]]:
     """
-    For each page result:
-      - Save native JSON and Markdown using pipeline result methods
-      - Load and return their content per page
+    Save native JSON and Markdown via official result methods and load for response.
     """
-    outputs: List[Dict[str, Any]] = []
-
-    # Save files via official result methods
     for res in res_list:
         res.save_to_json(save_path=work_dir)
         res.save_to_markdown(save_path=work_dir)
 
-    # Collect
     json_files = [os.path.join(work_dir, f) for f in os.listdir(work_dir) if f.lower().endswith(".json")]
     md_files = [os.path.join(work_dir, f) for f in os.listdir(work_dir) if f.lower().endswith(".md")]
+    md_index = {os.path.splitext(os.path.basename(p))[0]: p for p in md_files}
 
-    def stem(p): return os.path.splitext(os.path.basename(p))[0]
-    md_index = {stem(p): p for p in md_files}
-
-    page_entries = []
+    pages = []
     for jf in sorted(json_files):
+        key = os.path.splitext(os.path.basename(jf))[0]
         with open(jf, "r", encoding="utf-8") as f:
             j = json.load(f)
-        key = stem(jf)
         md_content = None
         if key in md_index:
             with open(md_index[key], "r", encoding="utf-8") as mf:
@@ -209,24 +220,20 @@ def _save_and_collect_outputs(res_list, work_dir: str) -> List[Dict[str, Any]]:
         except Exception:
             page_idx = None
 
-        page_entries.append({
-            "page_index": page_idx,
-            "json": j,
-            "markdown": md_content
-        })
-
-    return page_entries
+        pages.append({"page_index": page_idx, "json": j, "markdown": md_content})
+    return pages
 
 def _combine_markdown_pages_from_res(res_list) -> str:
     """
-    Create a single Markdown string for multi-page inputs using the documented API,
-    with fallbacks for older 3.x that place the method on the inner paddlex pipeline.
+    Produce a single Markdown string using the documented API with robust fallback.
     """
     md_list = []
     for res in res_list:
-        # Each res often carries a 'markdown' dict/text; if not, we saved and can load
         if hasattr(res, "markdown"):
-            md_list.append(res.markdown if isinstance(res.markdown, str) else res.markdown.get("markdown_texts", ""))
+            if isinstance(res.markdown, str):
+                md_list.append(res.markdown)
+            else:
+                md_list.append(res.markdown.get("markdown_texts", ""))
 
     # Prefer official convenience method, then robust fallback, else manual join
     try:
@@ -254,8 +261,12 @@ async def parse(files: List[UploadFile] = File(...)):
                 content = await uf.read()
                 out.write(content)
 
-            # Predict; keep chart parsing off to avoid optional VLM init on CPU
-            preds = PIPELINE.predict(tmp_path, use_chart_recognition=False)
+            # Predict; defensively disable chart parsing with both flags
+            preds = PIPELINE.predict(
+                tmp_path,
+                use_chart_recognition=False,
+                use_chart_parsing=False
+            )
 
             # Save native outputs and collect into response
             file_work = os.path.join(temp_root, next(tempfile._get_candidate_names()))
