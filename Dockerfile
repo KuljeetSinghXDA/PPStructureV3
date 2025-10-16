@@ -32,7 +32,8 @@ RUN python -m pip install --no-cache-dir "paddlepaddle" -i https://www.paddlepad
       pillow \
       beautifulsoup4 \
       lxml \
-      markdownify
+      markdownify \
+      python-multipart
 
 # Set working directory
 WORKDIR /app
