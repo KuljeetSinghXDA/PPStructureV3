@@ -170,8 +170,6 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
 
 # Instantiate configuration and set CPU threading env before pipeline init
 CONFIG = PPStructureV3Config()
-os.environ["OMP_NUM_THREADS"] = str(CONFIG.cpu_threads)
-os.environ["MKL_NUM_THREADS"] = str(CONFIG.cpu_threads)
 PIPELINE = build_pipeline(CONFIG)
 
 app = FastAPI(title="PP-StructureV3 Parser", version="1.1.0")
