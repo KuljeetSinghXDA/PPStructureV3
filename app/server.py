@@ -104,7 +104,6 @@ async def lifespan(app: FastAPI):
         text_det_limit_type=TEXT_DET_LIMIT_TYPE,
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-        show_log=False,
     )
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
     yield
