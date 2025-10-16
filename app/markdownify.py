@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 
+
 def _html_table_to_markdown(html: str) -> str:
     """
     Convert an HTML table to GitHub-Flavored Markdown.
@@ -110,4 +111,4 @@ def pages_to_markdown(
                     out_lines.append(f"<!-- {etype} element -->")
                     out_lines.append("")
 
-    return "\n".join(out_lines).strip()markdownify.py
+    return "\n".join(out_lines).strip()
