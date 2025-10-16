@@ -28,30 +28,26 @@ class DocumentParser:
     def __init__(self):
         self.engine = None
         self.is_initialized = False
-    
+
     def initialize_engine(self):
-    """Initialize PP-StructureV3 engine with configuration"""
-    try:
-        print("Initializing PP-StructureV3 engine...")
-        
-        # Get configuration kwargs - USING CORRECTED VERSION
-        init_kwargs = get_structurev3_kwargs()
-        
-        # Print configuration for debugging
-        print("Configuration being used:")
-        for key, value in init_kwargs.items():
-            print(f"  {key}: {value}")
-        
-        # Initialize PP-StructureV3 engine
-        self.engine = PPStructureV3(**init_kwargs)
-        self.is_initialized = True
-        
-        print("PP-StructureV3 engine initialized successfully")
-        
-    except Exception as e:
-        print(f"Error initializing PP-StructureV3 engine: {str(e)}")
-        raise e
-    
+        """Initialize PP-StructureV3 engine with configuration"""
+        try:
+            print("Initializing PP-StructureV3 engine...")
+            
+            # Get configuration kwargs
+            init_kwargs = get_structurev3_kwargs()
+            
+            # Initialize PP-StructureV3 engine
+            self.engine = PPStructureV3(**init_kwargs)
+            self.is_initialized = True
+            
+            print("PP-StructureV3 engine initialized successfully")
+            print(f"Configuration: {json.dumps(init_kwargs, indent=2, default=str)}")
+            
+        except Exception as e:
+            print(f"Error initializing PP-StructureV3 engine: {str(e)}")
+            raise e
+
     def parse_document(self, image_path: str) -> Dict[str, Any]:
         """Parse a single document using PP-StructureV3"""
         if not self.is_initialized or self.engine is None:
@@ -73,7 +69,7 @@ class DocumentParser:
         except Exception as e:
             print(f"Error parsing document {image_path}: {str(e)}")
             raise e
-    
+
     def _format_response(self, result: List, image_path: str) -> Dict[str, Any]:
         """Format PP-StructureV3 result into structured response"""
         if not result:
@@ -144,7 +140,7 @@ class DocumentParser:
             },
             "markdown": markdown_content
         }
-    
+
     def _generate_markdown(self, text_regions: List, tables: List, formulas: List) -> str:
         """Generate Markdown content from extracted elements"""
         markdown_lines = []
