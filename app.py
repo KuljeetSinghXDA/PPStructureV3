@@ -101,7 +101,7 @@ class PPStructureV3Config:
     combine_markdown_pages: bool = True
 
 def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
-    kwargs = dict(
+    raw_kwargs = dict(
         device=cfg.device,
         enable_hpi=cfg.enable_hpi,
         use_tensorrt=cfg.use_tensorrt,
@@ -182,14 +182,46 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
         chart_recognition_model_dir=cfg.chart_recognition_model_dir,
         chart_recognition_batch_size=cfg.chart_recognition_batch_size,
     )
-    # Drop only keys whose value is None
-    return PPStructureV3(**{k: v for k, v in kwargs.items() if v is not None})
 
-# Instantiate configuration and set CPU threading env before pipeline init
+    allowed_keys = {
+        "device", "enable_hpi", "use_tensorrt", "precision", "enable_mkldnn",
+        "mkldnn_cache_capacity", "cpu_threads", "lang",
+        "layout_detection_model_name", "text_detection_model_name", "text_recognition_model_name",
+        "layout_detection_model_dir", "text_detection_model_dir", "text_recognition_model_dir",
+        "use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation",
+        "use_seal_recognition", "use_table_recognition", "use_formula_recognition",
+        "use_chart_recognition", "use_region_detection",
+        "text_det_limit_side_len", "text_det_limit_type", "text_det_thresh",
+        "text_det_box_thresh", "text_det_unclip_ratio",
+        "layout_threshold", "layout_nms", "layout_unclip_ratio", "layout_merge_bboxes_mode",
+        "text_recognition_batch_size", "text_rec_score_thresh",
+        "table_classification_model_name", "table_classification_model_dir",
+        "wired_table_structure_recognition_model_name", "wired_table_structure_recognition_model_dir",
+        "wireless_table_structure_recognition_model_name", "wireless_table_structure_recognition_model_dir",
+        "wired_table_cells_detection_model_name", "wired_table_cells_detection_model_dir",
+        "wireless_table_cells_detection_model_name", "wireless_table_cells_detection_model_dir",
+        "table_orientation_classify_model_name", "table_orientation_classify_model_dir",
+        "formula_recognition_model_name", "formula_recognition_model_dir", "formula_recognition_batch_size",
+        "seal_text_detection_model_name", "seal_text_detection_model_dir",
+        "seal_det_limit_side_len", "seal_det_limit_type", "seal_det_thresh",
+        "seal_det_box_thresh", "seal_det_unclip_ratio",
+        "seal_text_recognition_model_name", "seal_text_recognition_model_dir",
+        "seal_text_recognition_batch_size", "seal_rec_score_thresh",
+        "chart_recognition_model_name", "chart_recognition_model_dir", "chart_recognition_batch_size",
+    }
+
+    filtered = {k: v for k, v in raw_kwargs.items() if v is not None and k in allowed_keys}
+    invalid = sorted([k for k in raw_kwargs.keys() if k not in allowed_keys and raw_kwargs[k] is not None])
+    if invalid:
+        raise ValueError(f"Invalid PPStructureV3 arguments: {invalid}. Remove or rename to documented parameters.")
+
+    return PPStructureV3(**filtered)
+
+# Instantiate configuration and pipeline
 CONFIG = PPStructureV3Config()
 PIPELINE = build_pipeline(CONFIG)
 
-app = FastAPI(title="PP-StructureV3 Parser", version="1.2.1")
+app = FastAPI(title="PP-StructureV3 Parser", version="1.2.2")
 
 def _save_and_collect_outputs(res_list, work_dir: str) -> List[Dict[str, Any]]:
     """
@@ -233,7 +265,7 @@ def _combine_markdown_pages_from_res(res_list) -> str:
             else:
                 md_list.append(res.markdown.get("markdown_texts", ""))
 
-    # Prefer official convenience method, then robust fallback, else manual join
+    # Prefer official convenience method, then backend fallback, else manual join
     try:
         return PIPELINE.concatenate_markdown_pages(md_list)
     except Exception:
