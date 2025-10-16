@@ -570,7 +570,8 @@ async def parse(
     async def run_infer_on_paths(paths: List[str]) -> Any:
         results = []
         for p in paths:
-            res = await run_in_threadpool(pipeline, p)  # PPStructureV3 is callable
+            # --- CHANGE 1: Explicitly pass the __call__ method ---
+            res = await run_in_threadpool(pipeline.__call__, p)
             results.append(res)
         return results
 
@@ -628,7 +629,8 @@ async def parse(
             return JSONResponse(out)
         else:
             # Single image
-            raw_result = await run_in_threadpool(pipeline, src_path)
+            # --- CHANGE 2: Explicitly pass the __call__ method ---
+            raw_result = await run_in_threadpool(pipeline.__call__, src_path)
             norm = normalize_ppsv3_results(raw_result)
             out = {
                 "file": Path(src_path).name,
