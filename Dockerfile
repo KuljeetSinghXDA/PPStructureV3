@@ -1,43 +1,24 @@
 FROM python:3.13-slim
 
-# Set working directory
-WORKDIR /app
-
-# Install system dependencies for ARM64
+# Install system dependencies for PDF handling (poppler for pdf2image) and general utils
 RUN apt-get update && apt-get install -y \
-    libgomp1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgl1-mesa-glx \
-    wget \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PaddlePaddle from nightly build (CPU version for ARM64)
+WORKDIR /app
+
+# Install PaddlePaddle from nightly CPU index (supports ARM64 via compatible wheels)
 RUN pip install --no-cache-dir "paddlepaddle" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
 
-# Install PaddleOCR 3.3.0 with doc-parser dependencies
+# Install PaddleOCR 3.3.0 with all extras for full PP-StructureV3 features
 RUN pip install --no-cache-dir "paddleocr[all]==3.3.0"
 
-# Install FastAPI and additional dependencies
-RUN pip install --no-cache-dir \
-    fastapi \
-    uvicorn[standard] \
-    python-multipart \
-    aiofiles
-# Copy application file
+# Install FastAPI dependencies for file uploads and server
+RUN pip install --no-cache-dir fastapi uvicorn python-multipart
+
+# Copy the application code
 COPY app.py .
 
-# Create directories for uploads and outputs
-RUN mkdir -p /app/uploads /app/outputs
-
-# Expose port
+# Expose port and run the server
 EXPOSE 8000
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV KMP_DUPLICATE_LIB_OK=TRUE
-
-# Run the application
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
