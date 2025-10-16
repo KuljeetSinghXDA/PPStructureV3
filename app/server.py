@@ -32,16 +32,16 @@ USE_CHART_RECOGNITION = False
 USE_REGION_DETECTION = True
 
 # Model overrides (latest from PP-StructureV3 / PaddleOCR 3.0)
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-plus-L"
-TEXT_DETECTION_MODEL_NAME = "en_PP-OCRv5_mobile_det"  # Mobile for CPU efficiency on ARM64
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"  # Mobile for CPU efficiency on ARM64
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-L"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
-SEAL_TEXT_DETECTION_MODEL_NAME = "PP-OCRv4_server_seal_det"
-SEAL_TEXT_RECOGNITION_MODEL_NAME = "ch_PP-OCRv4_server_rec"  # Primarily for Chinese seals; toggle off for EN
+SEAL_TEXT_DETECTION_MODEL_NAME = None
+SEAL_TEXT_RECOGNITION_MODEL_NAME = None  # Primarily for Chinese seals; toggle off for EN
 REGION_DETECTION_MODEL_NAME = None  # Uses default official model
 DOC_ORIENTATION_CLASSIFY_MODEL_NAME = None  # Default PP-LCNet_x1_0_doc_ori
 DOC_UNWARPING_MODEL_NAME = None  # Default UVDoc
