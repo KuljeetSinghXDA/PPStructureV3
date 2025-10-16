@@ -2,7 +2,7 @@
 
 FROM python:3.13-slim
 
-# System dependencies for PaddleOCR runtime (OpenCV headless, font/render libs, PDF utils)
+# System dependencies for PaddleOCR runtime (OpenCV headless, PDF utils)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     tzdata \
@@ -19,14 +19,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Python dependencies
+# Python deps:
 # - PaddlePaddle from the requested index, pinned to 3.3.0
-# - PaddleOCR with doc-parser extras to enable PP-StructureV3 and its submodules
-# - FastAPI stack and helpers
+# - PaddleOCR 3.3.0 with doc-parser extras for PP-StructureV3
+# - FastAPI stack
 RUN python -m pip install --upgrade pip && \
     pip install "paddlepaddle" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/ && \
-    pip install "paddleocr[all]==3.3.0" && \
-    pip install "fastapi" "uvicorn[standard]" "python-multipart" 
+    pip install "paddleocr[doc-parser]==3.3.0" && \
+    pip install "fastapi" "uvicorn[standard]" "python-multipart" "pillow"
+
 
 # Copy application
 COPY app.py /app/app.py
