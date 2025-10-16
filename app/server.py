@@ -34,7 +34,7 @@ USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 
 # Model overrides
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI):
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+        use_textline_orientation=USE_TEXTline_ORIENTATION,
         use_table_recognition=USE_TABLE_RECOGNITION,
         use_formula_recognition=USE_FORMULA_RECOGNITION,
         use_chart_recognition=USE_CHART_RECOGNITION,
@@ -140,7 +140,7 @@ app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifesp
 def health():
     return {"status": "ok"}
 
-@app.post("/parse")
+@app.post("/parse", response_model=None)
 async def parse_document(
     request: Request,
     file: UploadFile = File(...),
