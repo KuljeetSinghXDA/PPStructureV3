@@ -125,7 +125,6 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
         use_seal_recognition=cfg.use_seal_recognition,
         use_table_recognition=cfg.use_table_recognition,
         use_formula_recognition=cfg.use_formula_recognition,
-        use_chart_recognition=cfg.use_chart_recognition,
         use_region_detection=cfg.use_region_detection,
 
         # Text detection params
