@@ -13,6 +13,11 @@ import base64
 from io import BytesIO
 from PIL import Image
 from pdf2image import convert_from_bytes
+import logging
+
+# Set up logging for debugging (logs to stderr, visible in Docker)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 ENABLE_HPI = False
 ENABLE_MKLDNN = True
@@ -34,7 +39,7 @@ USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 
 # Model overrides
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
@@ -52,7 +57,6 @@ TEXT_DET_LIMIT_SIDE_LEN = None
 TEXT_DET_LIMIT_TYPE = None
 TEXT_REC_SCORE_THRESH = None
 TEXT_RECOGNITION_BATCH_SIZE = None
-
 
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
@@ -74,7 +78,34 @@ def pdf_to_images(pdf_bytes: bytes) -> List[Image.Image]:
     try:
         return convert_from_bytes(pdf_bytes, dpi=200)
     except Exception as e:
+        logger.error(f"PDF to image conversion failed: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Failed to process PDF: {str(e)}")
+
+def simple_md_renderer(layout, tables, formulas, charts):
+    """Simple Markdown renderer based on PP-StructureV3 output (custom synthesis since return_md may not be supported)"""
+    md_parts = []
+    # Basic layout text extraction (assuming layout has ['type', 'text'])
+    for region in layout:
+        if 'text' in region:
+            md_parts.append(region['text'])
+        md_parts.append("")  # Add line breaks
+    # Tables as Markdown tables
+    for table in tables:
+        if 'header' in table and 'data' in table:
+            columns = table['header']
+            if columns:
+                md_parts.append("| " + " | ".join(columns) + " |")
+                md_parts.append("| " + " | ".join(["---"] * len(columns)) + " |")
+                for row in table['data']:
+                    md_parts.append("| " + " | ".join(row) + " |")
+            md_parts.append("")
+    # Formulas as inline
+    for formula in formulas:
+        md_parts.append(f"Formula: {formula.get('latex', '')}")
+    # Charts as placeholder
+    for chart in charts:
+        md_parts.append("Chart detected (data extraction not implemented)")
+    return "\n".join(md_parts).strip()
 
 async def process_image_with_pipeline(image: Image.Image, request: Request, overrides: dict) -> dict:
     with app.state.predict_sem:
@@ -83,54 +114,70 @@ async def process_image_with_pipeline(image: Image.Image, request: Request, over
         for key, value in overrides.items():
             if hasattr(pipeline, key):
                 setattr(pipeline, key, value)
-        # Run OCR: Use return_md=True for Markdown output, covering all features
-        # Note: PPStructureV3 returns dict with 'layout', 'tables', 'formulas', 'charts', 'md'
+        # Run OCR: PPStructureV3 pipeline call (removed return_md=True as it may not be valid, causing 500)
+        # Based on PaddleOCR docs, it returns dict with 'layout', 'tables', 'formulas', 'charts'
         try:
-            result = await run_in_threadpool(lambda: pipeline(image=image, return_md=True))
+            logger.info("Starting PPStructureV3 processing...")
+            result = await run_in_threadpool(lambda: pipeline(image=image))
+            logger.info("PPStructureV3 processing completed.")
+            # Synthesize Markdown from results (since direct return_md may fail)
+            md_content = simple_md_renderer(
+                result.get("layout", []),
+                result.get("tables", []),
+                result.get("formulas", []),
+                result.get("charts", [])
+            )
             # Structure output to cover all features
             output = {
                 "status": "success",
-                "layout": result.get("layout", []),  # List of regions (type, bbox, etc.)
-                "tables": result.get("tables", []),  # Extracted table data
-                "formulas": result.get("formulas", []),  # Recognized formulas
-                "charts": result.get("charts", []),  # Chart extractions
-                "markdown": result.get("md", "")  # Full Markdown doc with reading order
+                "layout": result.get("layout", []),
+                "tables": result.get("tables", []),
+                "formulas": result.get("formulas", []),
+                "charts": result.get("charts", []),
+                "markdown": md_content
             }
             return output
         except Exception as e:
+            logger.error(f"Processing failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 # ================= App & Lifespan =================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pipeline = PPStructureV3(
-        device=DEVICE,
-        enable_mkldnn=ENABLE_MKLDNN,
-        enable_hpi=ENABLE_HPI,
-        cpu_threads=CPU_THREADS,
-        layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
-        text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
-        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
-        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
-        formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
-        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-        layout_threshold=LAYOUT_THRESHOLD,
-        text_det_thresh=TEXT_DET_THRESH,
-        text_det_box_thresh=TEXT_DET_BOX_THRESH,
-        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
-        text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
-        text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-        use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-        use_table_recognition=USE_TABLE_RECOGNITION,
-        use_formula_recognition=USE_FORMULA_RECOGNITION,
-        use_chart_recognition=USE_CHART_RECOGNITION,
-    )
+    logger.info("Initializing PPStructureV3 pipeline...")
+    try:
+        app.state.pipeline = PPStructureV3(
+            device=DEVICE,
+            enable_mkldnn=ENABLE_MKLDNN,
+            enable_hpi=ENABLE_HPI,
+            cpu_threads=CPU_THREADS,
+            layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
+            text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
+            text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
+            wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+            wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+            table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
+            formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
+            chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+            layout_threshold=LAYOUT_THRESHOLD,
+            text_det_thresh=TEXT_DET_THRESH,
+            text_det_box_thresh=TEXT_DET_BOX_THRESH,
+            text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
+            text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+            text_det_limit_type=TEXT_DET_LIMIT_TYPE,
+            text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
+            text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+            use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+            use_doc_unwarping=USE_DOC_UNWARPING,
+            use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+            use_table_recognition=USE_TABLE_RECOGNITION,
+            use_formula_recognition=USE_FORMULA_RECOGNITION,
+            use_chart_recognition=USE_CHART_RECOGNITION,
+        )
+        logger.info("PPStructureV3 pipeline initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize pipeline: {str(e)}")
+        raise
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
     yield
 
@@ -157,6 +204,7 @@ async def parse_document(
     - For PDFs, processes first page (extend for multi-page if needed).
     - Returns JSON with structured results and Markdown; use Accept: text/markdown for Markdown-only.
     """
+    logger.info(f"Received request for file: {file.filename}")
     # Validate file
     validate_file(file)
     
@@ -166,12 +214,14 @@ async def parse_document(
     # Handle PDF: Convert to first page image
     file_ext = Path(file.filename).suffix.lower()
     if file_ext == ".pdf":
+        logger.info("Processing PDF file...")
         images = pdf_to_images(file_bytes)
         if not images:
             raise HTTPException(status_code=400, detail="PDF has no pages.")
         image = images[0]  # Process first page
     else:
         # For images, open directly
+        logger.info("Processing image file...")
         image = Image.open(BytesIO(file_bytes))
     
     # Prepare overrides from query params
