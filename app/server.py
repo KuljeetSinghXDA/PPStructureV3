@@ -6,44 +6,44 @@ import shutil
 from pathlib import Path
 from typing import List, Literal, Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-import numpy as np
+import base64
+from io import BytesIO
 from PIL import Image
-import asyncio  # Add this import for asyncio.Semaphore
+from pdf2image import convert_from_bytes
 
-# Explicit imports for PaddleOCR components
-ENABLE_HPI = False  # High-performance inference (disable if causing issues)
-ENABLE_MKLDNN = True  # MKL-DNN acceleration for CPU
+ENABLE_HPI = False
+ENABLE_MKLDNN = True
 
 from paddleocr import PPStructureV3
 
 # ================= Core Configuration (Pinned Values) =================
-DEVICE = "cpu"  # Pin to CPU; set to "gpu" if using CUDA
-CPU_THREADS = 4  # Adjust based on hardware
+DEVICE = "cpu"
+CPU_THREADS = 4
 
-# Optional accuracy boosters (disabled for speed; enable per docs if needed)
+# Optional accuracy boosters
 USE_DOC_ORIENTATION_CLASSIFY = False
 USE_DOC_UNWARPING = False
 USE_TEXTLINE_ORIENTATION = False
 
-# Subpipeline toggles (per PP-StructureV3 docs)
+# Subpipeline toggles
 USE_TABLE_RECOGNITION = True
-USE_FORMULA_RECOGNITION = True  # Enabled for math parsing
-USE_CHART_RECOGNITION = True   # Enabled for chart handling
+USE_FORMULA_RECOGNITION = False
+USE_CHART_RECOGNITION = False
 
-# Model overrides (latest from docs: paddlepaddle.github.io)
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"  # Improved from M; see module_usage/layout_detection.html
+# Model overrides
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-M"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
-FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"  # See pipeline_usage/formula_recognition.html
+FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
 CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
 
-# Detection/recognition parameters (None for defaults)
+# Detection/recognition parameters
 LAYOUT_THRESHOLD = None
 TEXT_DET_THRESH = None
 TEXT_DET_BOX_THRESH = None
@@ -53,91 +53,52 @@ TEXT_DET_LIMIT_TYPE = None
 TEXT_REC_SCORE_THRESH = None
 TEXT_RECOGNITION_BATCH_SIZE = None
 
+
 # I/O and service limits
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
-MAX_PARALLEL_PREDICT = 1  # Semaphore for CPU bound tasks
+MAX_PARALLEL_PREDICT = 1
 
 # ================= Helper Functions =================
-def process_file(file_path: str, pipeline: PPStructureV3) -> dict:
-    """
-    Process a file (image/PDF) using PP-StructureV3.
-    Handles images by loading as NumPy array; PDFs are processed natively.
-    Returns the raw JSON-like dict output (per docs).
-    """
-    if file_path.lower().endswith('.pdf'):
-        # Direct PDF processing (PP-StructureV3 handles multi-page internally)
-        result = pipeline(file_path)
-    else:
-        # Load image, convert to NumPy, process
-        img = Image.open(file_path).convert("RGB")
-        img_np = np.array(img)
-        result = pipeline(img_np)
-    
-    return result  # Assumed dict with 'results' list, etc. (based on doc examples)
+def validate_file(file: UploadFile) -> None:
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+    file.file.seek(0, 2)  # Seek to end
+    size_mb = file.file.tell() / (1024 * 1024)
+    file.file.seek(0)  # Reset
+    if size_mb > MAX_FILE_SIZE_MB:
+        raise HTTPException(status_code=400, detail=f"File size exceeds {MAX_FILE_SIZE_MB} MB limit.")
 
-def json_to_markdown(data: dict) -> str:
-    """
-    Convert PP-StructureV3 JSON output to Markdown.
-    - Sorts by vertical position (bbox[1]).
-    - Text: Detects headers (short lines), paras (long lines).
-    - Tables: Converts to Markdown table (assumes content is HTML).
-    - Formulas/Charts: Renders as code blocks.
-    - Basic; full fidelity requires more parsing (e.g., LaTeX math syntax).
-    """
-    md_lines = []
-    results = data.get("results", [])
-    
-    # Sort by bounding box Y-coordinate for top-down order
-    sorted_results = sorted(results, key=lambda x: x.get('bbox', [0, 0, 0, 0])[1])
-    
-    for item in sorted_results:
-        item_type = item.get('type', 'text').lower()  # Default to text
-        content = item.get('content', item.get('text', ''))
-        bbox = item.get('bbox', [0, 0, 100, 20])  # Fallback bbox
-        
-        if item_type in ['text', 'paragraph']:
-            # Simple header/para detection: if line count < 3 and < 100 chars, treat as header
-            lines = content.split('\n')
-            if len(lines) <= 2 and len(content.strip()) < 100:
-                md_lines.append(f"# {content.strip()}")
-            else:
-                md_lines.append(content.strip())
-            md_lines.append("")  # Blank line
-        elif item_type == 'table':
-            # Assume content is HTML table; basic conversion to MD table
-            html_table = content
-            # Minimal HTML->MD: Split by rows/cells (rough approximation)
-            md_table_lines = []
-            rows = html_table.replace('<table>', '').replace('</table>', '').split('<tr>')
-            for row in rows:
-                if '<td>' in row or '<th>' in row:
-                    cells = []
-                    cols = row.split('</td>')[:-1]  # Chop off empty
-                    for col in cols:
-                        cell_text = col.split('>')[-1].strip()
-                        cells.append(cell_text)
-                    md_table_lines.append('| ' + ' | '.join(cells) + ' |')
-                    if len(md_table_lines) == 1:  # Add header separator
-                        md_table_lines.append('| ' + ' | '.join(['---'] * len(cells)) + ' |')
-            md_lines.extend(md_table_lines)
-            md_lines.append("")
-        elif item_type == 'formula':
-            # Render formulas as LaTeX code block (assumes content is LaTeX)
-            md_lines.append(f"$$ {content.strip()} $$")
-            md_lines.append("")
-        elif item_type == 'chart':
-            # Render as tabular data or code block (docs suggest chart->table conversion)
-            md_lines.append("```chart")
-            md_lines.append(content.strip() or "Chart data placeholder")
-            md_lines.append("```")
-            md_lines.append("")
-        else:
-            # Fallback: plain text
-            md_lines.append(content.strip())
-            md_lines.append("")
-    
-    return '\n'.join(md_lines).strip()
+def pdf_to_images(pdf_bytes: bytes) -> List[Image.Image]:
+    try:
+        return convert_from_bytes(pdf_bytes, dpi=200)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to process PDF: {str(e)}")
+
+async def process_image_with_pipeline(image: Image.Image, request: Request, overrides: dict) -> dict:
+    with app.state.predict_sem:
+        pipeline = app.state.pipeline
+        # Override pipeline parameters if provided (keeps defaults otherwise)
+        for key, value in overrides.items():
+            if hasattr(pipeline, key):
+                setattr(pipeline, key, value)
+        # Run OCR: Use return_md=True for Markdown output, covering all features
+        # Note: PPStructureV3 returns dict with 'layout', 'tables', 'formulas', 'charts', 'md'
+        try:
+            result = await run_in_threadpool(lambda: pipeline(image=image, return_md=True))
+            # Structure output to cover all features
+            output = {
+                "status": "success",
+                "layout": result.get("layout", []),  # List of regions (type, bbox, etc.)
+                "tables": result.get("tables", []),  # Extracted table data
+                "formulas": result.get("formulas", []),  # Recognized formulas
+                "charts": result.get("charts", []),  # Chart extractions
+                "markdown": result.get("md", "")  # Full Markdown doc with reading order
+            }
+            return output
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 # ================= App & Lifespan =================
 @asynccontextmanager
@@ -170,7 +131,7 @@ async def lifespan(app: FastAPI):
         use_formula_recognition=USE_FORMULA_RECOGNITION,
         use_chart_recognition=USE_CHART_RECOGNITION,
     )
-    app.state.predict_sem = asyncio.Semaphore(value=MAX_PARALLEL_PREDICT)  # Changed to asyncio.Semaphore
+    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
     yield
 
 app = FastAPI(title="PPStructureV3 /parse API", version="1.0.0", lifespan=lifespan)
@@ -180,43 +141,54 @@ def health():
     return {"status": "ok"}
 
 @app.post("/parse")
-async def parse(file: UploadFile = File(...)) -> JSONResponse:
+async def parse_document(
+    request: Request,
+    file: UploadFile = File(...),
+    use_doc_orientation_classify: Optional[bool] = Query(USE_DOC_ORIENTATION_CLASSIFY, description="Enable document orientation classification"),
+    use_doc_unwarping: Optional[bool] = Query(USE_DOC_UNWARPING, description="Enable document unwarping"),
+    use_textline_orientation: Optional[bool] = Query(USE_TEXTLINE_ORIENTATION, description="Enable textline orientation detection"),
+    use_table_recognition: Optional[bool] = Query(USE_TABLE_RECOGNITION, description="Enable table recognition"),
+    use_formula_recognition: Optional[bool] = Query(USE_FORMULA_RECOGNITION, description="Enable formula recognition"),
+    use_chart_recognition: Optional[bool] = Query(USE_CHART_RECOGNITION, description="Enable chart recognition")
+) -> JSONResponse | PlainTextResponse:
     """
-    Parse a document (image/PDF) using PP-StructureV3.
-    Returns JSON output directly, plus a Markdown representation.
+    Parse a document (image or PDF) using PP-StructureV3 pipeline.
+    - Supports layout detection (20 categories), table/formula/chart recognition, reading order, and Markdown output.
+    - For PDFs, processes first page (extend for multi-page if needed).
+    - Returns JSON with structured results and Markdown; use Accept: text/markdown for Markdown-only.
     """
-    # Acquire semaphore for concurrency control (now async-compatible)
-    async with app.state.predict_sem:
-        # Validate file type
-        if not file.filename:
-            raise HTTPException(status_code=400, detail="No file provided")
-        ext = Path(file.filename).suffix.lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {ALLOWED_EXTENSIONS}")
-        
-        # Read and validate file size
-        content = await file.read()
-        file_size = len(content)
-        if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-            raise HTTPException(status_code=400, detail=f"File too large. Max: {MAX_FILE_SIZE_MB}MB")
-        
-        # Save to temp file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
-            tmp_file.write(content)
-            tmp_path = tmp_file.name
-        
-        try:
-            # Process in threadpool (CPU-bound task)
-            pp_result = await run_in_threadpool(process_file, tmp_path, app.state.pipeline)
-            
-            # Generate Markdown from JSON
-            markdown_output = json_to_markdown(pp_result)
-            
-            # Return combined JSON response
-            return JSONResponse(content={
-                "json": pp_result,  # Raw PP-StructureV3 output
-                "markdown": markdown_output  # Generated Markdown string
-            })
-        finally:
-            # Clean up temp file
-            os.unlink(tmp_path)
+    # Validate file
+    validate_file(file)
+    
+    # Read file
+    file_bytes = await file.read()
+    
+    # Handle PDF: Convert to first page image
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext == ".pdf":
+        images = pdf_to_images(file_bytes)
+        if not images:
+            raise HTTPException(status_code=400, detail="PDF has no pages.")
+        image = images[0]  # Process first page
+    else:
+        # For images, open directly
+        image = Image.open(BytesIO(file_bytes))
+    
+    # Prepare overrides from query params
+    overrides = {
+        "use_doc_orientation_classify": use_doc_orientation_classify,
+        "use_doc_unwarping": use_doc_unwarping,
+        "use_textline_orientation": use_textline_orientation,
+        "use_table_recognition": use_table_recognition,
+        "use_formula_recognition": use_formula_recognition,
+        "use_chart_recognition": use_chart_recognition,
+    }
+    
+    # Process with pipeline
+    result = await process_image_with_pipeline(image, request, overrides)
+    
+    # Return based on Accept header
+    accept = request.headers.get("accept", "application/json")
+    if "text/markdown" in accept:
+        return PlainTextResponse(content=result["markdown"], media_type="text/markdown")
+    return JSONResponse(content=result)
