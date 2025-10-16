@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Core Python deps: Paddle (CPU), PaddleOCR, FastAPI stack, and PyMuPDF (import fitz)
 # Note: PyMuPDF provides wheels for Py3.9–3.13; no external deps when wheel is available
 RUN python -m pip install -U pip --root-user-action=ignore && \
-    python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/ --root-user-action=ignore && \
+    python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ --root-user-action=ignore && \
     python -m pip install "paddleocr[all]" fastapi uvicorn[standard] python-multipart --root-user-action=ignore && \
     python -m pip install "pymupdf" --root-user-action=ignore
 
