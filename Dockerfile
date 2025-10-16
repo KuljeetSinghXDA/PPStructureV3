@@ -1,5 +1,5 @@
 # app/Dockerfile
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 # Noninteractive apt
 ENV DEBIAN_FRONTEND=noninteractive \
