@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install PaddlePaddle and PaddleOCR
-RUN pip install --no-cache-dir "paddlepaddle==3.2.0" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
+RUN pip install --no-cache-dir "paddlepaddle" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
 RUN pip install --no-cache-dir "paddleocr[all]==3.3.0"
 
 # Install additional dependencies for FastAPI and web server
