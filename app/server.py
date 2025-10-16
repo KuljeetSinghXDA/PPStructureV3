@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI):
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTline_ORIENTATION,
+        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
         use_table_recognition=USE_TABLE_RECOGNITION,
         use_formula_recognition=USE_FORMULA_RECOGNITION,
         use_chart_recognition=USE_CHART_RECOGNITION,
