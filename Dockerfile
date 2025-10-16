@@ -3,7 +3,7 @@ FROM python:3.13-slim
 # Install system dependencies for PDF handling (poppler for pdf2image), OpenCV (libGL for headless), and general utils
 RUN apt-get update && apt-get install -y \
     poppler-utils \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
