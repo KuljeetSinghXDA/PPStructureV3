@@ -1,324 +1,180 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
-from typing import List, Optional, Dict, Any
+from paddleocr import PPStructureV3
+from typing import List
+import tempfile
 import os
 import json
-import tempfile
-import uuid
-from datetime import datetime
+from pathlib import Path
 
-try:
-    from paddleocr import PPStructureV3
-except ImportError:
-    raise ImportError("PaddleOCR is not installed. Please install it with: pip install paddleocr[all]")
+# ============================================
+# CONFIGURATION SECTION
+# All models, parameters, and settings are configurable here.
+# Follows native PP-StructureV3 implementation with specified models.
+# Optimized for best accuracy on English medical lab reports (e.g., tables with numerical data, text regions).
+# ============================================
 
-from models_config import get_structurev3_kwargs, get_pipeline_kwargs
+# Core Models (as specified: PP-DocLayout-L for layout, PP-OCRv5_mobile_det for detection, en_PP-OCRv5_mobile_rec for recognition)
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"  # High-precision layout (90.4% mAP, 23 classes incl. tables)
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"  # Mobile det for efficiency on ARM64 CPU
+TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"  # English-specific rec for medical terms/numbers
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="PP-StructureV3 Document Parser",
-    description="Document parsing API using PaddleOCR PP-StructureV3 for medical lab reports",
-    version="3.2.0"
+# Language and OCR Version
+LANG = "en"  # English for medical lab reports
+OCR_VERSION = "PP-OCRv5"  # Matches specified models
+
+# Device (CPU for ARM64)
+DEVICE = "cpu"
+
+# Pipeline Features (all enabled as per native PP-StructureV3 for full document analysis)
+USE_TABLE_RECOGNITION = True  # Critical for medical tables
+USE_REGION_DETECTION = True  # Detect blocks (headers, tables)
+USE_DOC_ORIENTATION_CLASSIFY = True  # Correct orientation
+USE_FORMULA_RECOGNITION = False  # Disable if not needed for labs (default off for efficiency)
+USE_SEAL_RECOGNITION = False  # Disable for non-stamped docs
+ENABLE_HPI = True  # High-performance inference (MKLDNN on CPU)
+
+# Layout Parameters (tuned for accuracy on structured reports)
+LAYOUT_THRESHOLD = 0.4  # Lower for detecting subtle tables (default 0.5)
+LAYOUT_NMS = True  # Non-max suppression
+LAYOUT_UNCLIP_RATIO = 1.2  # Expand boxes for better table coverage
+
+# Text Detection Parameters (for dense medical text/tables)
+TEXT_DET_LIMIT_SIDE_LEN = 960
+TEXT_DET_THRESH = 0.2  # Lower for small/dense text in reports
+TEXT_DET_BOX_THRESH = 0.5  # Adjusted for precision
+TEXT_DET_UNCLIP_RATIO = 2.0
+
+# Text Recognition Parameters
+TEXT_REC_SCORE_THRESH = 0.7  # Higher to filter low-conf medical terms
+
+# Table-Specific Parameters (for lab report tables: wired/wireless)
+USE_WIRED_TABLE_CELLS_TRANS_TO_HTML = True
+USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML = True
+USE_OCR_RESULTS_WITH_TABLE_CELLS = True  # Re-OCR cells for complete data
+USE_TABLE_ORIENTATION_CLASSIFY = True  # Handle rotated tables
+TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"  # Default high-accuracy classifier
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANeXt_wired"  # Default for bordered tables (common in labs)
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_wireless"  # Default for borderless
+
+# Other Defaults (as per native: no custom paths, auto-download models)
+PADDLEX_CONFIG = None  # Set to YAML path if custom fine-tuned config
+VISUALIZE = False  # Disable for production (saves memory on ARM64)
+MAX_NUM_INPUT_IMGS = None  # Process all pages in PDFs
+
+# ============================================
+# FASTAPI APP SETUP
+# ============================================
+
+app = FastAPI(title="PP-StructureV3 API", description="Document parsing with PP-StructureV3 for medical lab reports")
+
+# Initialize PP-StructureV3 pipeline with all configs
+pipeline = PPStructureV3(
+    lang=LANG,
+    ocr_version=OCR_VERSION,
+    layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
+    text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
+    text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
+    table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
+    wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+    wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+    use_table_recognition=USE_TABLE_RECOGNITION,
+    use_region_detection=USE_REGION_DETECTION,
+    use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+    device=DEVICE,
+    enable_hpi=ENABLE_HPI,
+    paddlex_config=PADDLEX_CONFIG,
+    # Layout params
+    layout_threshold=LAYOUT_THRESHOLD,
+    layout_nms=LAYOUT_NMS,
+    layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
+    # Text det params
+    text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+    text_det_thresh=TEXT_DET_THRESH,
+    text_det_box_thresh=TEXT_DET_BOX_THRESH,
+    text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
+    # Text rec params
+    text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
+    # Table params
+    use_wired_table_cells_trans_to_html=USE_WIRED_TABLE_CELLS_TRANS_TO_HTML,
+    use_wireless_table_cells_trans_to_html=USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML,
+    use_ocr_results_with_table_cells=USE_OCR_RESULTS_WITH_TABLE_CELLS,
+    use_table_orientation_classify=USE_TABLE_ORIENTATION_CLASSIFY,
+    visualize=VISUALIZE,
+    max_num_input_imgs=MAX_NUM_INPUT_IMGS,
 )
 
-# Global variable for PP-StructureV3 model
-structure_engine = None
-
-class DocumentParser:
-    def __init__(self):
-        self.engine = None
-        self.is_initialized = False
-
-    def initialize_engine(self):
-        """Initialize PP-StructureV3 engine with configuration"""
-        try:
-            print("Initializing PP-StructureV3 engine...")
-            
-            # Get configuration kwargs
-            init_kwargs = get_structurev3_kwargs()
-            
-            # Initialize PP-StructureV3 engine
-            self.engine = PPStructureV3(**init_kwargs)
-            self.is_initialized = True
-            
-            print("PP-StructureV3 engine initialized successfully")
-            print(f"Configuration: {json.dumps(init_kwargs, indent=2, default=str)}")
-            
-        except Exception as e:
-            print(f"Error initializing PP-StructureV3 engine: {str(e)}")
-            raise e
-
-    def parse_document(self, image_path: str) -> Dict[str, Any]:
-        """Parse a single document using PP-StructureV3"""
-        if not self.is_initialized or self.engine is None:
-            raise RuntimeError("PP-StructureV3 engine not initialized")
-        
-        try:
-            # Get pipeline execution kwargs
-            pipeline_kwargs = get_pipeline_kwargs()
-            
-            print(f"Parsing document: {image_path}")
-            print(f"Pipeline kwargs: {pipeline_kwargs}")
-            
-            # Process document with PP-StructureV3
-            result = self.engine(image_path, **pipeline_kwargs)
-            
-            # Format response
-            return self._format_response(result, image_path)
-            
-        except Exception as e:
-            print(f"Error parsing document {image_path}: {str(e)}")
-            raise e
-
-    def _format_response(self, result: List, image_path: str) -> Dict[str, Any]:
-        """Format PP-StructureV3 result into structured response"""
-        if not result:
-            return {
-                "status": "error",
-                "message": "No content extracted from document",
-                "file": os.path.basename(image_path)
-            }
-        
-        # Extract layout information
-        layouts = []
-        extracted_text = []
-        tables = []
-        formulas = []
-        
-        for item in result:
-            # Layout information
-            if 'layout' in item:
-                layouts.append({
-                    "label": item['layout']['label'],
-                    "bbox": item['layout']['bbox'],
-                    "score": float(item['layout']['score'])
-                })
-            
-            # Extracted text
-            if 'text' in item and 'bbox' in item:
-                extracted_text.append({
-                    "text": item['text'],
-                    "bbox": item['bbox'],
-                    "confidence": float(item.get('confidence', 0.0)),
-                    "text_region": item.get('text_region', [])
-                })
-            
-            # Tables
-            if 'table' in item:
-                tables.append({
-                    "html": item['table']['html'],
-                    "bbox": item['table']['bbox'],
-                    "score": float(item['table']['score'])
-                })
-            
-            # Formulas
-            if 'formula' in item:
-                formulas.append({
-                    "latex": item['formula']['latex'],
-                    "bbox": item['formula']['bbox'],
-                    "score": float(item['formula']['score'])
-                })
-        
-        # Generate Markdown content
-        markdown_content = self._generate_markdown(extracted_text, tables, formulas)
-        
-        return {
-            "status": "success",
-            "file": os.path.basename(image_path),
-            "timestamp": datetime.now().isoformat(),
-            "analysis": {
-                "layout_regions": len(layouts),
-                "text_regions": len(extracted_text),
-                "tables": len(tables),
-                "formulas": len(formulas)
-            },
-            "content": {
-                "layouts": layouts,
-                "text": extracted_text,
-                "tables": tables,
-                "formulas": formulas
-            },
-            "markdown": markdown_content
-        }
-
-    def _generate_markdown(self, text_regions: List, tables: List, formulas: List) -> str:
-        """Generate Markdown content from extracted elements"""
-        markdown_lines = []
-        
-        # Add text content
-        if text_regions:
-            markdown_lines.append("# Document Content\n")
-            for i, text_region in enumerate(text_regions, 1):
-                markdown_lines.append(f"{text_region['text']}\n")
-        
-        # Add tables
-        if tables:
-            markdown_lines.append("\n# Tables\n")
-            for i, table in enumerate(tables, 1):
-                markdown_lines.append(f"## Table {i}\n")
-                # For simplicity, we include the HTML table
-                # In production, you might want to convert HTML table to Markdown
-                markdown_lines.append(f"```html\n{table['html']}\n```\n\n")
-        
-        # Add formulas
-        if formulas:
-            markdown_lines.append("\n# Formulas\n")
-            for i, formula in enumerate(formulas, 1):
-                markdown_lines.append(f"## Formula {i}\n")
-                markdown_lines.append(f"LaTeX: ${formula['latex']}$\n\n")
-        
-        return "\n".join(markdown_lines) if markdown_lines else "No content extracted"
-
-# Global document parser instance
-document_parser = DocumentParser()
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize PP-StructureV3 engine on startup"""
-    try:
-        document_parser.initialize_engine()
-    except Exception as e:
-        print(f"Failed to initialize PP-StructureV3 engine: {e}")
-        # Don't raise here to allow the app to start, but parsing will fail
-
-@app.get("/")
-async def root():
-    return {
-        "message": "PP-StructureV3 Document Parser API",
-        "version": "3.2.0",
-        "status": "ready" if document_parser.is_initialized else "initializing"
-    }
-
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy" if document_parser.is_initialized else "unhealthy",
-        "engine_initialized": document_parser.is_initialized,
-        "timestamp": datetime.now().isoformat()
-    }
-
 @app.post("/parse")
-async def parse_documents(
-    background_tasks: BackgroundTasks,
-    files: List[UploadFile] = File(..., description="Multiple document files to parse")
-):
+async def parse_documents(files: List[UploadFile] = File(..., description="Multiple image/PDF files for parsing")):
     """
-    Parse multiple documents using PP-StructureV3
-    Returns JSON with extracted content and Markdown
+    Endpoint to parse multiple documents using PP-StructureV3.
+    - Supports images (PNG/JPG) and PDFs (multi-page).
+    - Outputs JSON (structured layout/tables/OCR) and Markdown (readable format) per file.
+    - Configurable via variables in this file only.
     """
-    if not document_parser.is_initialized:
-        raise HTTPException(
-            status_code=503,
-            detail="PP-StructureV3 engine is not initialized. Please try again later."
-        )
-    
     if not files:
-        raise HTTPException(
-            status_code=400, 
-            detail="No files provided"
-        )
-    
+        raise HTTPException(status_code=400, detail="No files provided")
+
     results = []
-    temp_files = []
-    
-    try:
-        for file in files:
-            # Validate file type
-            if not file.content_type.startswith('image/') and file.content_type != 'application/pdf':
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported file type: {file.content_type}. Only images and PDFs are supported."
-                )
-            
-            # Create temporary file
-            file_extension = os.path.splitext(file.filename)[1]
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_extension)
-            temp_files.append(temp_file.name)
-            
-            # Write uploaded file to temporary file
-            content = await file.read()
-            temp_file.write(content)
-            temp_file.close()
-            
-            # Parse document
-            result = document_parser.parse_document(temp_file.name)
-            results.append(result)
-        
-        # Cleanup temporary files in background
-        background_tasks.add_task(cleanup_temp_files, temp_files)
-        
-        return JSONResponse(content={
-            "status": "success",
-            "processed_files": len(results),
-            "results": results
-        })
-    
-    except Exception as e:
-        # Cleanup on error
-        cleanup_temp_files(temp_files)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing documents: {str(e)}"
-        )
+    for file in files:
+        if not file.content_type.startswith(('image/', 'application/pdf')):
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
 
-@app.post("/parse-single")
-async def parse_single_document(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="Single document file to parse")
-):
-    """
-    Parse a single document using PP-StructureV3
-    """
-    if not document_parser.is_initialized:
-        raise HTTPException(
-            status_code=503,
-            detail="PP-StructureV3 engine is not initialized"
-        )
-    
-    temp_file = None
-    try:
-        # Validate file type
-        if not file.content_type.startswith('image/') and file.content_type != 'application/pdf':
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file type: {file.content_type}"
-            )
-        
-        # Create temporary file
-        file_extension = os.path.splitext(file.filename)[1]
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_extension)
-        temp_file_path = temp_file.name
-        
-        # Write uploaded file to temporary file
-        content = await file.read()
-        temp_file.write(content)
-        temp_file.close()
-        
-        # Parse document
-        result = document_parser.parse_document(temp_file_path)
-        
-        # Cleanup in background
-        background_tasks.add_task(cleanup_temp_files, [temp_file_path])
-        
-        return JSONResponse(content=result)
-    
-    except Exception as e:
-        if temp_file and os.path.exists(temp_file.name):
-            cleanup_temp_files([temp_file.name])
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing document: {str(e)}"
-        )
+        # Read and save temp file (PPStructureV3 requires file path)
+        contents = await file.read()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
+            tmp_file.write(contents)
+            tmp_path = tmp_file.name
 
-def cleanup_temp_files(file_paths: List[str]):
-    """Clean up temporary files"""
-    for file_path in file_paths:
         try:
-            if os.path.exists(file_path):
-                os.unlink(file_path)
-        except Exception as e:
-            print(f"Error cleaning up temporary file {file_path}: {e}")
+            # Run PP-StructureV3 prediction (handles multi-page PDFs as list of results)
+            output = pipeline.predict(
+                input=tmp_path,
+                use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+                use_table_recognition=USE_TABLE_RECOGNITION,
+                use_region_detection=USE_REGION_DETECTION,
+                layout_threshold=LAYOUT_THRESHOLD,
+                layout_nms=LAYOUT_NMS,
+                layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
+                text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+                text_det_thresh=TEXT_DET_THRESH,
+                text_det_box_thresh=TEXT_DET_BOX_THRESH,
+                text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
+                use_wired_table_cells_trans_to_html=USE_WIRED_TABLE_CELLS_TRANS_TO_HTML,
+                use_wireless_table_cells_trans_to_html=USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML,
+                use_ocr_results_with_table_cells=USE_OCR_RESULTS_WITH_TABLE_CELLS,
+                use_table_orientation_classify=USE_TABLE_ORIENTATION_CLASSIFY,
+                visualize=VISUALIZE,
+            )
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+            # Collect JSON and Markdown per page/file
+            page_jsons = []
+            page_markdowns = []
+            for res in output:
+                # JSON: Full structured output (layout, tables, OCR)
+                page_jsons.append(res.json)
+
+                # Markdown: Readable format (text, tables as HTML/MD)
+                if hasattr(res, 'markdown') and res.markdown:
+                    md_text = res.markdown.get('markdown_texts', [''])[0] if res.markdown.get('markdown_texts') else ''
+                    page_markdowns.append(md_text)
+                else:
+                    page_markdowns.append('')  # Empty if no MD
+
+            # Concatenate Markdown pages with separators for multi-page docs
+            full_markdown = '\n\n---\n\n'.join(page_markdowns)
+
+            results.append({
+                "filename": file.filename,
+                "pages_count": len(output),
+                "json": page_jsons,  # List of JSON dicts (one per page)
+                "markdown": full_markdown  # Concatenated MD string
+            })
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error processing {file.filename}: {str(e)}")
+        finally:
+            # Clean up temp file
+            os.unlink(tmp_path)
+
+    return JSONResponse(content={"results": results})
