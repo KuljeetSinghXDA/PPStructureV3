@@ -1,0 +1,9 @@
+services:
+  ppstructurev3:
+    platform: linux/arm64/v8
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./cache:/root/.cache
