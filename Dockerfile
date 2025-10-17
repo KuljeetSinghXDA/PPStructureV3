@@ -1,4 +1,4 @@
-FROM --platform=linux/arm64/v8 python:3.13-slim
+FROM --platform=linux/arm64/v8 python:3.12-slim
 
 # Install system dependencies for PDF handling (poppler), OpenCV, image libs, and build tools
 RUN apt-get update && apt-get install -y \
@@ -12,24 +12,17 @@ RUN apt-get update && apt-get install -y \
     wget \
     cmake \
     g++ \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip and install pinned PaddlePaddle (CPU, ARM64 via custom index)
 RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir paddlepaddle -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
+RUN pip install --no-cache-dir paddlepaddle==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
 
 # Install upgraded PaddleOCR with doc-parser extras for PP-StructureV3
 RUN pip install --no-cache-dir "paddleocr[doc-parser]==3.3.0"
 
-# Install paddlex and onnxruntime (wheels available for py3.13 aarch64)
-RUN pip install --no-cache-dir paddlex onnxruntime
-
-# Install paddle2onnx from source (latest v2.0.1 for ARM64 py3.13 compatibility)
-RUN git clone https://github.com/PaddlePaddle/Paddle2ONNX.git /tmp/Paddle2ONNX && \
-    cd /tmp/Paddle2ONNX && \
-    pip install -e . && \
-    rm -rf /tmp/Paddle2ONNX
+# Install ONNX dependencies for export and inference (latest paddle2onnx with ARM64 wheels)
+RUN pip install --no-cache-dir paddle2onnx==2.0.1 onnxruntime paddlex
 
 # Install API dependencies
 RUN pip install --no-cache-dir fastapi uvicorn[standard] python-multipart beautifulsoup4 lxml
@@ -68,7 +61,7 @@ os.unlink('/tmp/dummy.jpg')
 home = os.path.expanduser('~')
 exported = []
 
-# Detection model
+# Detection model (PP-OCRv5_mobile_det_infer or similar)
 det_dirs = glob.glob(f"{home}/.paddleocr/whl/det_en/*PP-OCRv5_mobile_det_infer") + glob.glob(f"{home}/.paddleocr/whl/det_en/*_det_infer")
 if det_dirs:
     det_dir = det_dirs[0]
@@ -77,7 +70,7 @@ if det_dirs:
 else:
     print("Warning: Det model dir not found")
 
-# Recognition model
+# Recognition model (en_PP-OCRv5_mobile_rec_infer)
 rec_dirs = glob.glob(f"{home}/.paddleocr/whl/rec_en/*en_PP-OCRv5_mobile_rec_infer") + glob.glob(f"{home}/.paddleocr/whl/rec_en/*_rec_infer")
 if rec_dirs:
     rec_dir = rec_dirs[0]
@@ -86,7 +79,7 @@ if rec_dirs:
 else:
     print("Warning: Rec model dir not found")
 
-# Layout model
+# Layout model (PP-DocLayout-L_infer)
 layout_dirs = glob.glob(f"{home}/.paddlex/official_models/layout/*PP-DocLayout-L_infer") + glob.glob(f"{home}/.paddlex/official_models/layout/*_infer")
 if layout_dirs:
     layout_dir = layout_dirs[0]
