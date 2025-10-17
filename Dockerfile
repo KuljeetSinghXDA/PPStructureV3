@@ -1,5 +1,5 @@
 # Build on ARM64 host or use: docker build --platform=linux/arm64/v8
-FROM --platform=linux/arm64/v8 python:3.12-slim
+FROM --platform=linux/arm64/v8 python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OMP_NUM_THREADS=4 \
     USE_CHART_RECOGNITION=1
 
-# System deps for PDFs and image backends
+# System dependencies for PDFs and image backends
 RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     libgl1 \
@@ -22,7 +22,7 @@ RUN python -m pip install --upgrade pip && \
     python -m pip install --pre paddlepaddle -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/ && \
     python -m pip install "paddleocr[doc-parser]==3.3.0" fastapi "uvicorn[standard]" python-multipart pymupdf
 
-# FastAPI app: monkey-patch VLM loader, charts enabled by default, accuracy tuning applied
+# FastAPI app with VLM loader patch, charts enabled by default, accuracy tuning applied
 RUN cat > /app.py << 'EOF'
 import os
 import json
@@ -34,41 +34,56 @@ from typing import List, Dict, Any
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
-# 1) Monkey-patch PaddleX VLM from_pretrained to set safe defaults
-#    This avoids UnboundLocalError around transpose_weight_keys/key_mapping in PP-Chart2Table path.
+# 1) Monkey-patch PaddleX vendorized transformers-like from_pretrained to avoid
+#    UnboundLocalError on transpose_weight_keys/key_mapping in PP-Chart2Table path.
 try:
-    from paddlex.inference.models.common.vlm.transformers import model_utils as _px_mu
-    _orig_from_pretrained = _px_mu.from_pretrained
+    # Vendorized HF-like classes live here in PaddleX
+    from paddlex.inference.models.common.vlm.transformers.model_utils import PreTrainedModel as _PX_PreTrainedModel
+    _orig_ptm = _PX_PreTrainedModel.from_pretrained
+    _orig_ptm_func = _orig_ptm.__func__ if isinstance(_orig_ptm, classmethod) else _orig_ptm
 
-    def _patched_from_pretrained(cls, *args, **kwargs):
-        # Ensure kwargs expected by VLM weight loaders are present
-        kwargs.setdefault("transpose_weight_keys", None)   # safe default
-        # If HF-style key mapping is used, align with recent VLM fixes; fallback to class mapping if provided
+    def _patched_ptm_from_pretrained(cls, *args, **kwargs):
+        kwargs.setdefault("transpose_weight_keys", None)
         if "key_mapping" not in kwargs:
             km = getattr(cls, "_checkpoint_conversion_mapping", None)
             if km:
                 kwargs["key_mapping"] = km
-        return _orig_from_pretrained(cls, *args, **kwargs)
+        return _orig_ptm_func(cls, *args, **kwargs)
 
-    _px_mu.from_pretrained = _patched_from_pretrained
+    _PX_PreTrainedModel.from_pretrained = classmethod(_patched_ptm_from_pretrained)
+
+    # Also patch the specific PPChart2TableInference classmethod if present
+    try:
+        from paddlex.inference.models.doc_vlm.predictor import PPChart2TableInference as _PX_ChartInf
+        _orig_ci = _PX_ChartInf.from_pretrained
+        _orig_ci_func = _orig_ci.__func__ if isinstance(_orig_ci, classmethod) else _orig_ci
+
+        def _patched_chart_from_pretrained(cls, *args, **kwargs):
+            kwargs.setdefault("transpose_weight_keys", None)
+            kwargs.setdefault("key_mapping", None)
+            return _orig_ci_func(cls, *args, **kwargs)
+
+        _PX_ChartInf.from_pretrained = classmethod(_patched_chart_from_pretrained)
+    except Exception:
+        pass
 except Exception:
-    # If the internal path changes in future versions, proceed without patch; charts can be disabled via env.
+    # If internal paths differ in future versions, charts can be disabled via env switch below.
     pass
 
-from paddleocr import PPStructureV3
+from paddleocr import PPStructureV3  # Import after patch
 
 app = FastAPI(title="PP-StructureV3 API (ARM64, charts patched)", version="3.3.0")
 
 # Toggle chart module via env (default on)
 _use_chart = os.getenv("USE_CHART_RECOGNITION", "1") not in ("0", "false", "False")
 
-# 2) Initialize PP-StructureV3 with requested models, chart module toggle, and accuracy tuning
+# 2) Initialize PP-StructureV3 with requested models, chart toggle, and accuracy tuning
 pipeline = PPStructureV3(
     layout_detection_model_name="PP-DocLayout-L",
     text_detection_model_name="PP-OCRv5_mobile_det",
     text_recognition_model_name="en_PP-OCRv5_mobile_rec",
-    use_chart_recognition=_use_chart,   # default True, can export USE_CHART_RECOGNITION=0 to disable
-    cpu_threads=4,                      # Ampere A1 4 OCPU
+    use_chart_recognition=_use_chart,   # set USE_CHART_RECOGNITION=0 to bypass PP-Chart2Table
+    cpu_threads=4,                      # Ampere A1 4 OCPU single-process
     # Accuracy-oriented tuning for small fonts / dense tables
     text_det_limit_side_len=1920,
     text_det_limit_type="max",
