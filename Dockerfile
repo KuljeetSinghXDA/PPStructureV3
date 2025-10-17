@@ -3,8 +3,8 @@ FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    OMP_NUM_THREADS=4
+    PIP_NO_CACHE_DIR=1 
+#    OMP_NUM_THREADS=4
 
 # System deps for PDFs and image backends
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -59,7 +59,7 @@ PRECISION = None                # FP32 default for CPU
 MKLDNN_CACHE_CAPACITY = 10      # Standard cache for MKL-DNN
 
 # Threads
-CPU_THREADS = 4                 # Ampere A1 4 OCPU single-process
+CPU_THREADS = None                 # Ampere A1 4 OCPU single-process
 
 # Optional PaddleX config passthrough (kept None)
 PADDLEX_CONFIG = None
@@ -143,12 +143,12 @@ SEAL_REC_SCORE_THRESH = None
 
 # Predict-time table recognition defaults - TUNED FOR LAB REPORTS
 # CRITICAL: use_table_orientation_classify MUST be False to avoid PaddleOCR 3.2.0 UnboundLocalError bug
-DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = True   # Use OCR results for better cell text accuracy
+DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = None   # Use OCR results for better cell text accuracy
 DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL = None      # Use default (None lets library decide)
 DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL = None   # Use default (None lets library decide)
 DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML = None    # Use default (None lets library decide)
 DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML = None # Use default (None lets library decide)
-DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = False    # MUST be False to avoid library bug at line 1310
+DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = None    # MUST be False to avoid library bug at line 1310
 
 # ==============================
 # END OF CONFIGURATION
