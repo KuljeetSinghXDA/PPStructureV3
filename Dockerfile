@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
 
 # Upgrade pip and install pinned PaddlePaddle (CPU, ARM64 via custom index)
 RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir paddlepaddle==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+RUN pip install --no-cache-dir paddlepaddle -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
 
 # Install upgraded PaddleOCR with doc-parser extras for PP-StructureV3
 RUN pip install --no-cache-dir "paddleocr[doc-parser]==3.3.0"
