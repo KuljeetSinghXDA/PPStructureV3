@@ -8,8 +8,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    # Prefer HF for model downloads (PaddleOCR 3.x supports switching sources)
-    PADDLE_PDX_MODEL_SOURCE=huggingface
+    OMP_NUM_THREADS=4 \
+    OPENBLAS_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    NUMEXPR_NUM_THREADS=4
 
 # Minimal runtime libs for Paddle/OpenCV/PyMuPDF on slim images
 RUN apt-get update && apt-get install -y --no-install-recommends \
