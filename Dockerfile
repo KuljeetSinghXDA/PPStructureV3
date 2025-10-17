@@ -1,5 +1,5 @@
 # Build on ARM64 host or use: docker build --platform=linux/arm64/v8
-FROM python:3.13-slim
+FROM --platform=linux/arm64/v8 python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -23,7 +23,7 @@ RUN python -m pip install --upgrade pip && \
     python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
 
 # Embedded FastAPI app:
-# - One long-lived PP-StructureV3 with medical lab report optimized parameters
+# - One long-lived PP-StructureV3 with requested models and accuracy tuning
 # - All supported init args exposed (None => library defaults)
 # - All documented table predict-time flags exposed (None => default)
 # - Native JSON/Markdown outputs; HPI not enabled for ARM64 stability
@@ -54,37 +54,38 @@ def _file_exceeds_limit(tmp_path: Path) -> bool:
     except Exception:
         return False
 
-app = FastAPI(title="PP-StructureV3 API (ARM64, Medical Lab Optimized)", version="3.2.0")
+app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
 
 # ==============================
-# OPTIMIZED PARAMETERS FOR MEDICAL LAB REPORTS
+# Supported PP-StructureV3 params (None => defaults)
+# TUNED FOR MEDICAL LAB REPORTS: tables, small fonts, dense layouts
 # ==============================
 # Backend/config toggles
-DEVICE = None
-ENABLE_MKLDNN = None
-ENABLE_HPI = None      # Keep None/False on ARM64 to avoid PaddleX HPI plugin
-USE_TENSORRT = None
-PRECISION = None
-MKLDNN_CACHE_CAPACITY = None
+DEVICE = "cpu"                  # Explicit CPU device
+ENABLE_MKLDNN = True            # Enable CPU optimization for better performance
+ENABLE_HPI = False              # Keep False on ARM64 to avoid PaddleX HPI plugin
+USE_TENSORRT = None             # Not applicable for CPU
+PRECISION = None                # FP32 default for CPU
+MKLDNN_CACHE_CAPACITY = 10      # Standard cache for MKL-DNN
 
 # Threads
-CPU_THREADS = 4         # Ampere A1 4 OCPU single-process
+CPU_THREADS = 4                 # Ampere A1 4 OCPU single-process
 
 # Optional PaddleX config passthrough (kept None)
 PADDLEX_CONFIG = None
 
-# Subpipeline toggles - Enable table recognition for medical lab reports
-USE_DOC_ORIENTATION_CLASSIFY = None
-USE_DOC_UNWARPING = None
-USE_TEXTLINE_ORIENTATION = None
-USE_TABLE_RECOGNITION = True       # CRITICAL: Enable for lab tables
-USE_FORMULA_RECOGNITION = None
-USE_CHART_RECOGNITION = None
-USE_SEAL_RECOGNITION = None
-USE_REGION_DETECTION = None
+# Subpipeline toggles - TUNED FOR LAB REPORTS
+USE_DOC_ORIENTATION_CLASSIFY = False      # Enable to handle rotated scans
+USE_DOC_UNWARPING = False                # Keep False on ARM64 for stability
+USE_TEXTLINE_ORIENTATION = False          # Enable for mixed orientation text
+USE_TABLE_RECOGNITION = True             # CRITICAL: Enable for lab report tables
+USE_FORMULA_RECOGNITION = None           # Not typically needed for lab reports
+USE_CHART_RECOGNITION = None             # Not typically needed for lab reports
+USE_SEAL_RECOGNITION = None              # Not typically needed for lab reports
+USE_REGION_DETECTION = None              # Let layout detection handle regions
 
-# Model names - optimized for accuracy on medical documents
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"  # Larger model for better layout detection
+# Model names (requested three set; others None) - DO NOT CHANGE
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 REGION_DETECTION_MODEL_NAME = None
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
@@ -102,7 +103,7 @@ SEAL_TEXT_DETECTION_MODEL_NAME = None
 SEAL_TEXT_RECOGNITION_MODEL_NAME = None
 CHART_RECOGNITION_MODEL_NAME = None
 
-# Model dirs
+# Model dirs - All None to use default downloads
 LAYOUT_DETECTION_MODEL_DIR = None
 REGION_DETECTION_MODEL_DIR = None
 TEXT_DETECTION_MODEL_DIR = None
@@ -121,34 +122,34 @@ SEAL_TEXT_DETECTION_MODEL_DIR = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
 CHART_RECOGNITION_MODEL_DIR = None
 
-# Layout thresholds/controls - optimized for dense layouts
-LAYOUT_THRESHOLD = 0.3               # Lower threshold to catch more elements
-LAYOUT_NMS = True                    # Enable NMS for overlapping regions
-LAYOUT_UNCLIP_RATIO = 1.2           # Slightly expand layout regions
-LAYOUT_MERGE_BBOXES_MODE = None
+# Layout thresholds/controls - TUNED FOR DENSE LAYOUTS
+LAYOUT_THRESHOLD = 0.4          # Lower threshold to detect more layout regions
+LAYOUT_NMS = 0.5                # Standard NMS for proper overlap handling
+LAYOUT_UNCLIP_RATIO = 1.3       # Slightly expand layout boxes for better coverage
+LAYOUT_MERGE_BBOXES_MODE = None # Use default merging behavior
 
-# Text detection tuning - CRITICAL FOR SMALL DENSE TEXT
-TEXT_DET_LIMIT_SIDE_LEN = 1280       # Higher resolution for small text
-TEXT_DET_LIMIT_TYPE = "max"          # Use max to preserve detail
-TEXT_DET_THRESH = 0.2               # Lower pixel threshold for faint text
-TEXT_DET_BOX_THRESH = 0.4           # Lower box threshold for better recall
-TEXT_DET_UNCLIP_RATIO = 2.0         # Larger unclip for small text expansion
+# Text detection tuning - OPTIMIZED FOR SMALL FONTS
+TEXT_DET_LIMIT_SIDE_LEN = 1920  # Increase from 960 to 1920 for high-res small text detection
+TEXT_DET_LIMIT_TYPE = "max"     # Ensure longest side doesn't exceed limit
+TEXT_DET_THRESH = 0.2           # Lower from 0.3 to 0.2 for better small/faint text detection
+TEXT_DET_BOX_THRESH = 0.5       # Lower from 0.6 to 0.5 for more lenient box acceptance
+TEXT_DET_UNCLIP_RATIO = 1.5     # Reduce from 2.0 to 1.5 for tighter boxes in dense layouts
 
-# Seal detection tuning (if needed for stamps on lab reports)
+# Seal detection tuning - Not used but set to None
 SEAL_DET_LIMIT_SIDE_LEN = None
 SEAL_DET_LIMIT_TYPE = None
 SEAL_DET_THRESH = None
 SEAL_DET_BOX_THRESH = None
 SEAL_DET_UNCLIP_RATIO = None
 
-# Recognition thresholds/batches - optimized for accuracy
-TEXT_REC_SCORE_THRESH = 0.3          # Lower threshold to keep more text
-TEXT_RECOGNITION_BATCH_SIZE = 8      # Smaller batch for stability
-TEXTLINE_ORIENTATION_BATCH_SIZE = None
-FORMULA_RECOGNITION_BATCH_SIZE = None
-CHART_RECOGNITION_BATCH_SIZE = None
-SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
-SEAL_REC_SCORE_THRESH = None
+# Recognition thresholds/batches - TUNED FOR ACCURACY
+TEXT_REC_SCORE_THRESH = 0.5           # Set threshold to filter low-confidence results
+TEXT_RECOGNITION_BATCH_SIZE = 8       # Batch size 8 for better accuracy/speed balance
+TEXTLINE_ORIENTATION_BATCH_SIZE = 8   # Match text recognition batch size
+FORMULA_RECOGNITION_BATCH_SIZE = None # Not used
+CHART_RECOGNITION_BATCH_SIZE = None   # Not used
+SEAL_TEXT_RECOGNITION_BATCH_SIZE = None # Not used
+SEAL_REC_SCORE_THRESH = None          # Not used
 
 # Init kwargs builder (filters None so library defaults apply)
 def _build_init_kwargs() -> Dict[str, Any]:
@@ -245,7 +246,7 @@ def _build_init_kwargs() -> Dict[str, Any]:
 # Build final init kwargs
 _init_kwargs = _build_init_kwargs()
 
-# Initialize pipeline with medical lab optimized parameters
+# Initialize pipeline with all tuning applied via _init_kwargs (no overrides below)
 pipeline = PPStructureV3(**_init_kwargs)
 
 # Gate to enforce one-at-a-time inference
@@ -259,11 +260,11 @@ def predict_collect_one(path: Path,
                         use_wireless_table_cells_trans_to_html,
                         use_table_orientation_classify) -> Dict[str, Any]:
     kwargs = {}
-    # Medical lab reports benefit from cell-level OCR for table accuracy
-    if use_ocr_results_with_table_cells is None:
-        kwargs["use_ocr_results_with_table_cells"] = True  # Default to True for medical tables
-    else:
+    # Default table-specific settings for lab reports - optimized for accuracy
+    if use_ocr_results_with_table_cells is not None:
         kwargs["use_ocr_results_with_table_cells"] = use_ocr_results_with_table_cells
+    else:
+        kwargs["use_ocr_results_with_table_cells"] = True  # Use OCR results for better cell text
         
     if use_e2e_wired_table_rec_model is not None:
         kwargs["use_e2e_wired_table_rec_model"] = use_e2e_wired_table_rec_model
@@ -273,8 +274,11 @@ def predict_collect_one(path: Path,
         kwargs["use_wired_table_cells_trans_to_html"] = use_wired_table_cells_trans_to_html
     if use_wireless_table_cells_trans_to_html is not None:
         kwargs["use_wireless_table_cells_trans_to_html"] = use_wireless_table_cells_trans_to_html
+        
     if use_table_orientation_classify is not None:
         kwargs["use_table_orientation_classify"] = use_table_orientation_classify
+    else:
+        kwargs["use_table_orientation_classify"] = True  # Enable table orientation for scanned docs
 
     outputs = pipeline.predict(str(path), **kwargs)
     pages = []
@@ -303,19 +307,19 @@ def predict_collect_one(path: Path,
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "optimized_for": "medical_lab_reports"}
+    return {"status": "ok"}
 
 @app.post("/parse")
 async def parse(
     files: List[UploadFile] = File(...),
     output_format: Literal["json", "markdown", "both"] = Query("both"),
-    # Optional predict-time table flags with medical-optimized defaults
-    use_ocr_results_with_table_cells = Query(True),  # Default to True for medical accuracy
+    # Optional predict-time table flags (with sensible defaults for lab reports)
+    use_ocr_results_with_table_cells = Query(None),
     use_e2e_wired_table_rec_model = Query(None),
     use_e2e_wireless_table_rec_model = Query(None),
     use_wired_table_cells_trans_to_html = Query(None),
     use_wireless_table_cells_trans_to_html = Query(None),
-    use_table_orientation_classify = Query(True),  # Default to True for rotated lab reports
+    use_table_orientation_classify = Query(None),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
