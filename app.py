@@ -1,3 +1,8 @@
+# ppstructurev3_service.py
+# Official PP-StructureV3 HTTP service with an additional /parse alias
+# - /layout-parsing: official JSON contract (Base64 or URL), strict, no fallbacks
+# - /parse: optional alias for multipart file uploads returning Markdown (to eliminate client confusion)
+
 import os
 import io
 import uuid
@@ -9,15 +14,16 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, validator
 from PIL import Image
 
 from paddleocr import PPStructureV3
 
+
 # =========================
-# Defaults tuned for lab reports (documented parameters only)
+# Defaults (documented parameters only; tuned for lab reports)
 # =========================
 DEVICE = os.getenv("PPOCR_DEVICE", "cpu")
 LANG = os.getenv("PPOCR_LANG", "en")
@@ -53,7 +59,7 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
 
-# Optional name/dir fields are left None to use official defaults/auto-download
+# Optional name/dir fields use official defaults (None = auto)
 REGION_DETECTION_MODEL_NAME = None
 TEXT_DETECTION_MODEL_NAME = None
 TEXT_RECOGNITION_MODEL_NAME = None
@@ -86,13 +92,14 @@ SEAL_TEXT_DETECTION_MODEL_DIR = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
 CHART_RECOGNITION_MODEL_DIR = None
 
+
 # =========================
-# Request/Response models (official schema)
+# Request/Response models for official /layout-parsing
 # =========================
 class LayoutParsingRequest(BaseModel):
     # Required
     file: str = Field(..., description="URL of an image/PDF or Base64-encoded content")
-    # Optional, 0=PDF, 1=Image; if None, server can infer (we try to infer; if ambiguous we require fileType)
+    # Optional, 0=PDF, 1=Image
     fileType: Optional[int] = Field(None, description="0=PDF, 1=Image")
 
     # Predict-time toggles (camelCase per official docs)
@@ -125,7 +132,7 @@ class LayoutParsingRequest(BaseModel):
     sealDetUnclipRatio: Optional[float] = None
     sealRecScoreThresh: Optional[float] = None
 
-    # Table predict behavior (documented)
+    # Table predict behavior
     useWiredTableCellsTransToHtml: Optional[bool] = None
     useWirelessTableCellsTransToHtml: Optional[bool] = None
     useTableOrientationClassify: Optional[bool] = None
@@ -133,7 +140,7 @@ class LayoutParsingRequest(BaseModel):
     useE2eWiredTableRecModel: Optional[bool] = None
     useE2eWirelessTableRecModel: Optional[bool] = None
 
-    # Whether to include output images (see docs)
+    # Whether to include output images (optional)
     visualize: Optional[bool] = None
 
     @validator("fileType")
@@ -144,19 +151,18 @@ class LayoutParsingRequest(BaseModel):
 
 
 # =========================
-# Helpers
+# Helpers (no schema fallbacks)
 # =========================
 def _is_probably_base64(s: str) -> bool:
-    # Heuristic: data URI or long chunk of base64 characters
     if s.startswith("data:"):
         return True
-    if len(s) > 128 and all(c.isalnum() or c in "+/=\n\r" for c in s[:256]):
-        return True
+    if len(s) > 128:
+        allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r")
+        return all(c in allowed for c in s[:256])
     return False
 
 def _save_base64_to_tmp(b64: str, suffix: str) -> str:
     if b64.startswith("data:"):
-        # data:image/png;base64,....
         b64 = b64.split(",", 1)[1]
     raw = base64.b64decode(b64, validate=False)
     td = tempfile.mkdtemp(prefix="ppsv3_")
@@ -165,49 +171,45 @@ def _save_base64_to_tmp(b64: str, suffix: str) -> str:
         f.write(raw)
     return fp
 
-def _pil_to_base64_jpeg(img: Image.Image) -> str:
+def _pil_to_base64(img: Image.Image, fmt: str = "PNG", quality: int = 90) -> str:
     buf = io.BytesIO()
-    # Use JPEG for outputImages as per docs; for markdown images, PNG/JPEG both acceptable
-    img.convert("RGB").save(buf, format="JPEG", quality=85)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-def _pil_to_base64_png(img: Image.Image) -> str:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    if fmt.upper() == "JPEG":
+        img.convert("RGB").save(buf, format="JPEG", quality=quality)
+    else:
+        img.save(buf, format=fmt)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 def _prune_input_path_and_page_index(d: Any) -> Any:
-    # Remove 'input_path' and 'page_index' keys anywhere in nested dicts
     if isinstance(d, dict):
-        return {
-            k: _prune_input_path_and_page_index(v)
-            for k, v in d.items()
-            if k not in ("input_path", "page_index")
-        }
+        return {k: _prune_input_path_and_page_index(v)
+                for k, v in d.items() if k not in ("input_path", "page_index")}
     if isinstance(d, list):
         return [_prune_input_path_and_page_index(v) for v in d]
     return d
 
 def _build_markdown_obj(md: Dict[str, Any]) -> Dict[str, Any]:
-    # Official Result.markdown fields: text, images, isStart, isEnd
-    # PPStructureV3.markdown returns dict with keys markdown_texts, markdown_images, page_continuation_flags (per docs)
-    text = md["markdown_texts"]  # strict (no fallbacks)
+    # Strict: keys must exist (no fallbacks)
+    text = md["markdown_texts"]
     imgs: Dict[str, Image.Image] = md["markdown_images"]
     flags: Tuple[bool, bool] = md["page_continuation_flags"]
-    images_b64: Dict[str, str] = {k: _pil_to_base64_png(v) for k, v in imgs.items()}
-    return {
-        "text": text,
-        "images": images_b64,
-        "isStart": bool(flags[0]),
-        "isEnd": bool(flags[1]),
-    }
+    images_b64: Dict[str, str] = {k: _pil_to_base64(v, fmt="PNG") for k, v in imgs.items()}
+    return {"text": text, "images": images_b64, "isStart": bool(flags[0]), "isEnd": bool(flags[1])}
+
+def _embed_images_in_markdown(md_text: str, images_map_b64: Dict[str, str]) -> str:
+    # Replace "(key)" and src="key" with data URIs
+    for key, b64 in images_map_b64.items():
+        data_uri = f"data:image/png;base64,{b64}"
+        md_text = md_text.replace(f"({key})", f"({data_uri})")
+        md_text = md_text.replace(f'src="{key}"', f'src="{data_uri}"')
+    return md_text
+
 
 # =========================
 # App lifecycle
 # =========================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize a single pipeline instance with documented parameters only
+    # Initialize a single pipeline instance (strict, documented args only)
     app.state.pipeline = PPStructureV3(
         # language and device
         lang=LANG,
@@ -276,7 +278,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="PP-StructureV3 Service (Official Contract)", version="3.0", lifespan=lifespan)
+app = FastAPI(title="PP-StructureV3 Service (Official + /parse alias)", version="3.1", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -285,7 +287,7 @@ def health():
 
 
 # =========================
-# Official endpoint
+# Official endpoint: /layout-parsing
 # =========================
 @app.post("/layout-parsing")
 def layout_parsing(req: LayoutParsingRequest):
@@ -296,14 +298,11 @@ def layout_parsing(req: LayoutParsingRequest):
     - Response: {logId, errorCode, errorMsg, result: {layoutParsingResults, dataInfo}}
     """
     log_id = str(uuid.uuid4())
-
-    # Materialize input
     tmp_dir = None
     input_arg: Union[str, Path]
 
     try:
         if _is_probably_base64(req.file):
-            # Require fileType to avoid ambiguity; if missing, default based on magic
             suffix = ".pdf" if req.fileType == 0 else ".png"
             tmp_path = _save_base64_to_tmp(req.file, suffix)
             tmp_dir = str(Path(tmp_path).parent)
@@ -365,7 +364,6 @@ def layout_parsing(req: LayoutParsingRequest):
         # Build response
         results: List[Dict[str, Any]] = []
         for res in outputs:
-            # Strictly use documented attributes
             res_json = res.json
             if not isinstance(res_json, dict) or "res" not in res_json:
                 raise HTTPException(status_code=500, detail="Unexpected result structure from pipeline")
@@ -380,10 +378,9 @@ def layout_parsing(req: LayoutParsingRequest):
 
             output_images_obj: Optional[Dict[str, str]] = None
             if req.visualize is True or req.visualize is None:
-                # Return images by default if visualize is omitted (per docs behavior)
                 imgs = res.img  # dict of PIL images
                 if isinstance(imgs, dict) and imgs:
-                    output_images_obj = {k: _pil_to_base64_jpeg(v) for k, v in imgs.items()}
+                    output_images_obj = {k: _pil_to_base64(v, fmt="JPEG", quality=85) for k, v in imgs.items()}
 
             results.append(
                 {
@@ -411,13 +408,61 @@ def layout_parsing(req: LayoutParsingRequest):
         raise
     except Exception as e:
         return JSONResponse(
-            {
-                "logId": log_id,
-                "errorCode": 500,
-                "errorMsg": f"Inference failed: {type(e).__name__}: {str(e)}",
-            },
+            {"logId": log_id, "errorCode": 500, "errorMsg": f"Inference failed: {type(e).__name__}: {str(e)}"},
             status_code=500,
         )
     finally:
         if tmp_dir and Path(tmp_dir).exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# =========================
+# Optional alias endpoint: /parse
+# - Accepts multipart/form-data file upload (UploadFile)
+# - Returns Markdown by default (joined across pages)
+# - Goal: eliminate client confusion between /layout-parsing and /parse
+# =========================
+@app.post("/parse")
+def parse_alias(
+    file: UploadFile = File(..., description="Image or PDF"),
+    output_format: Optional[str] = Query("markdown", regex="^(markdown|json)$"),
+    markdown_images: Optional[str] = Query("inline", regex="^(inline|none)$"),
+):
+    tmpdir = tempfile.mkdtemp(prefix="ppsv3_")
+    fp = os.path.join(tmpdir, file.filename or "upload.bin")
+    try:
+        with open(fp, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        pipeline: PPStructureV3 = app.state.pipeline
+        outputs = pipeline.predict(input=fp)
+
+        # Collect per-page markdown objects
+        page_markdowns: List[Dict[str, Any]] = []
+        merged_text_parts: List[str] = []
+
+        for res in outputs:
+            md = res.markdown  # strict: expects keys below
+            md_obj = _build_markdown_obj(md)  # {text, images, isStart, isEnd}
+            page_markdowns.append(md_obj)
+
+            # Inline images into text if requested
+            text = md_obj["text"]
+            if markdown_images == "inline" and md_obj.get("images"):
+                text = _embed_images_in_markdown(text, md_obj["images"])
+            merged_text_parts.append(text)
+
+        if output_format == "json":
+            # Return per-page markdown objects (images already base64) in JSON
+            return JSONResponse({"pages": len(page_markdowns), "markdownPages": page_markdowns})
+        else:
+            # Return merged Markdown text
+            merged_md = "\n\n".join(merged_text_parts)
+            return PlainTextResponse(merged_md)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Inference failed: {type(e).__name__}: {str(e)}")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
