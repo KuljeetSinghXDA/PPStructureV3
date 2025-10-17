@@ -1,5 +1,5 @@
 # Build on ARM64 host or use: docker build --platform=linux/arm64/v8
-FROM --platform=linux/arm64/v8 python:3.13-slim
+FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
