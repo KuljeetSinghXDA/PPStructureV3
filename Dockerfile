@@ -26,7 +26,7 @@ RUN python -m pip install "paddlepaddle" \
 # 2) PaddleOCR from release/3.3 branch + only the dependency group needed by PP-StructureV3
 #    (you can switch to [all] if you want every extra)
 RUN python -m pip install \
-    paddleocr[doc-parser] \
+    paddleocr[all] \
     fastapi uvicorn[standard] \
     python-multipart
 
