@@ -112,29 +112,29 @@ SEAL_TEXT_DETECTION_MODEL_DIR = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
 CHART_RECOGNITION_MODEL_DIR = None
 
-# Layout thresholds/controls - OPTIMIZED FOR DENSE MEDICAL LAYOUTS
-LAYOUT_THRESHOLD = 0.4                # Lower threshold for better layout detection in dense docs
-LAYOUT_NMS = 0.5                      # Moderate NMS for layout elements
-LAYOUT_UNCLIP_RATIO = 1.8             # Expand layout boxes for better text capture
+# Layout thresholds/controls
+LAYOUT_THRESHOLD = None
+LAYOUT_NMS = None
+LAYOUT_UNCLIP_RATIO = None
 LAYOUT_MERGE_BBOXES_MODE = None
 
-# Text detection tuning - OPTIMIZED FOR SMALL FONTS
-TEXT_DET_LIMIT_SIDE_LEN = 1536        # Higher resolution for small text
-TEXT_DET_LIMIT_TYPE = "max"           # Resize based on max dimension
-TEXT_DET_THRESH = 0.3                 # Lower threshold for small font detection
-TEXT_DET_BOX_THRESH = 0.25            # Lower box threshold for dense text
-TEXT_DET_UNCLIP_RATIO = 1.8           # Expand text boxes for small fonts
+# Text detection tuning
+TEXT_DET_LIMIT_SIDE_LEN = None
+TEXT_DET_LIMIT_TYPE = None
+TEXT_DET_THRESH = None
+TEXT_DET_BOX_THRESH = None
+TEXT_DET_UNCLIP_RATIO = None
 
-# Seal detection tuning (disabled)
+# Seal detection tuning
 SEAL_DET_LIMIT_SIDE_LEN = None
 SEAL_DET_LIMIT_TYPE = None
 SEAL_DET_THRESH = None
 SEAL_DET_BOX_THRESH = None
 SEAL_DET_UNCLIP_RATIO = None
 
-# Recognition thresholds/batches - OPTIMIZED FOR ACCURACY
-TEXT_REC_SCORE_THRESH = 0.7           # Higher confidence threshold for medical accuracy
-TEXT_RECOGNITION_BATCH_SIZE = 8       # Batch processing for efficiency
+# Recognition thresholds/batches
+TEXT_REC_SCORE_THRESH = None
+TEXT_RECOGNITION_BATCH_SIZE = None
 TEXTLINE_ORIENTATION_BATCH_SIZE = None
 FORMULA_RECOGNITION_BATCH_SIZE = None
 CHART_RECOGNITION_BATCH_SIZE = None
