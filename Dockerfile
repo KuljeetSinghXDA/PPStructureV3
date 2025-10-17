@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     OMP_NUM_THREADS=4
 
-# System deps for PDF and image processing on CPU
+# Add cmake and compiler toolchain before pip installs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     libgl1 \
@@ -16,13 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     libgomp1 \
     wget \
+    cmake \
+    build-essential \
  && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip and install PaddlePaddle CPU from the nightly index (ARM64 wheels)
 RUN python -m pip install --upgrade pip && \
     python -m pip install --pre paddlepaddle -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
 
-# Install PaddleOCR (doc-parser extras) pinned at 3.3.0, ONNX stack, and API deps
+# Keep PaddleOCR 3.3.0 with doc-parser extras, ONNX stack, and API deps
 RUN python -m pip install \
     "paddleocr[doc-parser]==3.3.0" \
     onnxruntime \
