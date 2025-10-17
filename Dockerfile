@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # PaddlePaddle nightly CPU (ARM64) and PaddleOCR 3.3.0 doc-parser group
 RUN python -m pip install --upgrade pip && \
     python -m pip install --pre paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
-    python -m pip install "paddleocr[doc-parser]==3.3.0" fastapi "uvicorn[standard]" python-multipart pymupdf
+    python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
 
 # Embedded FastAPI app:
 # - One long-lived PP-StructureV3 with requested models and accuracy tuning
