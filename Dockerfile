@@ -59,7 +59,7 @@ PRECISION = None                # FP32 default for CPU
 MKLDNN_CACHE_CAPACITY = 10      # Standard cache for MKL-DNN
 
 # Threads
-CPU_THREADS = None                 # Ampere A1 4 OCPU single-process
+CPU_THREADS = 4                 # Ampere A1 4 OCPU single-process
 
 # Optional PaddleX config passthrough (kept None)
 PADDLEX_CONFIG = None
