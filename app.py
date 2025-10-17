@@ -43,7 +43,7 @@ class PPStructureV3Config:
     use_seal_recognition: bool = False
     use_table_recognition: bool = True
     use_formula_recognition: bool = True
-    use_chart_recognition: bool = False            # disable chart VLM
+    use_chart_recognition: bool = False            # keep chart VLM off
     use_region_detection: bool = True
 
     # Detection params
@@ -99,6 +99,32 @@ class PPStructureV3Config:
 
     # Markdown combination behavior
     combine_markdown_pages: bool = True
+
+def _patch_disable_chart_creation():
+    """
+    Workaround for environments where chart model is created despite use_chart_recognition=False.
+    Skips creating the chart predictor by short-circuiting BasePipeline.create_model when the
+    model_name indicates a chart VLM.
+    """
+    try:
+        import paddlex.inference.pipelines.base as _px_base
+        _orig_create_model = _px_base.BasePipeline.create_model
+
+        def _safe_create_model(self, config, **kwargs):
+            mn = ""
+            try:
+                if isinstance(config, dict):
+                    mn = str(config.get("model_name", "") or "")
+            except Exception:
+                mn = ""
+            if mn and ("PP-Chart2Table" in mn or "Chart2Table" in mn or "doc_vlm" in mn or "chart" in mn.lower()):
+                return None
+            return _orig_create_model(self, config, **kwargs)
+
+        _px_base.BasePipeline.create_model = _safe_create_model
+    except Exception:
+        # Non-fatal: if patch cannot be applied, proceed and rely on the flag at predict
+        pass
 
 def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
     raw_kwargs = dict(
@@ -215,14 +241,17 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
     if invalid:
         raise ValueError(f"Invalid PPStructureV3 arguments: {invalid}. Remove or rename to documented parameters.")
 
-    # Do NOT pass paddlex_config here; rely on documented flags like use_chart_recognition [web:21].
+    # Apply a defensive patch to ensure chart model isn't created if disabled
+    if not filtered.get("use_chart_recognition", True):
+        _patch_disable_chart_creation()
+
     return PPStructureV3(**filtered)
 
 # Instantiate configuration and pipeline
 CONFIG = PPStructureV3Config()
 PIPELINE = build_pipeline(CONFIG)
 
-app = FastAPI(title="PP-StructureV3 Parser", version="1.3.1")
+app = FastAPI(title="PP-StructureV3 Parser", version="1.3.2")
 
 def _save_and_collect_outputs(res_list, work_dir: str) -> List[Dict[str, Any]]:
     """
@@ -293,10 +322,7 @@ async def parse(files: List[UploadFile] = File(...)):
                 out.write(content)
 
             # Predict; keep chart parsing off via the supported flag
-            preds = PIPELINE.predict(
-                tmp_path,
-                use_chart_recognition=False
-            )
+            preds = PIPELINE.predict(tmp_path, use_chart_recognition=False)
 
             # Save native outputs and collect into response
             file_work = os.path.join(temp_root, next(tempfile._get_candidate_names()))
