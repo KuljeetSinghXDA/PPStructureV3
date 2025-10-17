@@ -24,7 +24,7 @@ WORKDIR /app
 # - PaddleOCR 3.3.0 with doc-parser extras for PP-StructureV3
 # - FastAPI stack
 RUN python -m pip install --upgrade pip && \
-    pip install "paddlepaddle==3.3.0" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/ && \
+    pip install "paddlepaddle" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/ && \
     pip install "paddleocr[doc-parser]==3.3.0" && \
     pip install "fastapi==0.114.*" "uvicorn[standard]==0.30.*" "python-multipart==0.0.9" "pillow==10.*"
 
