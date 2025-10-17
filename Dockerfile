@@ -21,7 +21,7 @@ WORKDIR /app
 # 1) Install PaddlePaddle from the requested nightly CPU index (no version pin).
 #    If you need a particular version later, adjust at build time.
 RUN python -m pip install "paddlepaddle" \
-    -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
+    -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
 
 # 2) Install PaddleOCR 3.3 codebase and API/runtime deps (no extra pins).
 #    Using the 3.3 release branch per your request.
