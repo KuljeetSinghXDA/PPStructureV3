@@ -1,18 +1,12 @@
 # app.py
-# Clean, official-like PP-StructureV3 wrapper for ARM64 CPU
-# - Minimal, version-safe parameter surface (signature-filtered)
-# - Defaults tuned for medical lab reports (English)
-# - Endpoint mirrors native usage: construct -> predict(input=path) -> save_to_json/markdown (+ concat)
-# - Avoids passing None/unknown kwargs to native code
+# PP-StructureV3 FastAPI wrapper (official-like, signature-safe, tuned for medical lab reports on ARM64)
+# - Only passes parameters present in the installed PPStructureV3 signatures (prevents native crashes)
+# - Minimal, clean endpoint that mirrors the official usage: pipeline.predict(input=path)
+# - Multi-page Markdown concatenation via native helper (with safe fallback) + optional base64 inlining of images
+# - Sensible defaults for English medical lab reports; all overrides are optional
 
-# IMPORTANT: set math library thread env before importing Paddle/numeric libs
-import os as _os
-_os.environ.setdefault("OMP_NUM_THREADS", "2")
-_os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
-_os.environ.setdefault("MKL_NUM_THREADS", "2")
-_os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "2")
-_os.environ.setdefault("NUMEXPR_NUM_THREADS", "2")
-
+# Set thread env before importing numeric libs/Paddle (helps stability on some ARM64 builds)
+import os 
 import io
 import json
 import base64
@@ -31,65 +25,60 @@ from PIL import Image, UnidentifiedImageError
 from paddleocr import PPStructureV3
 
 
-# ================= Defaults (ARM64 CPU; optimized for medical lab reports in English) =================
+# ================= Defaults (ARM64 CPU; optimized for English medical lab reports) =================
 DEVICE = "cpu"
 CPU_THREADS = 4
 LANG = "en"
 
-# Sub-pipelines (keep high-value modules enabled; region detection off for stability)
+# High-impact toggles (keep stable modules on; heavy/fragile ones off)
 USE_DOC_ORIENTATION_CLASSIFY = True
 USE_DOC_UNWARPING = False
 USE_TEXTLINE_ORIENTATION = True
 USE_TABLE_RECOGNITION = True
+USE_REGION_DETECTION = False
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 USE_SEAL_RECOGNITION = False
-USE_REGION_DETECTION = False
 
-# Core models (balanced accuracy/speed on CPU; switch to server models if you can afford the cost)
+# Core models (balanced for CPU)
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 
-# Optional model dirs (empty string means “not provided”; we never pass None)
+# Optional model dirs (empty string => not passed)
 LAYOUT_DETECTION_MODEL_DIR = ""
 REGION_DETECTION_MODEL_DIR = ""
 TEXT_DETECTION_MODEL_DIR = ""
 TEXT_RECOGNITION_MODEL_DIR = ""
 
-# Layout thresholds: rely on pipeline defaults unless explicitly overridden
-LAYOUT_THRESHOLD = ""          # float/dict or "" to not pass
-LAYOUT_NMS = ""                # bool or "" to not pass
-LAYOUT_UNCLIP_RATIO = ""       # float or "" to not pass
-LAYOUT_MERGE_BBOXES_MODE = ""  # '', 'all', 'text_and_table'
-
-# Text detection (DB) tuning for tiny fonts in lab reports
+# Text detection (DB) tuning (helps tiny fonts in A4 scans)
 TEXT_DET_LIMIT_SIDE_LEN = 1536
-TEXT_DET_LIMIT_TYPE = ""       # use pipeline default
+TEXT_DET_LIMIT_TYPE = ""            # let pipeline default
 TEXT_DET_DB_THRESH = 0.30
 TEXT_DET_DB_BOX_THRESH = 0.40
 TEXT_DET_DB_UNCLIP_RATIO = 2.0
-TEXT_DET_DB_SCORE_MODE = ""    # '', 'fast', 'slow' (keep default)
+TEXT_DET_DB_SCORE_MODE = ""         # default (keep empty to not pass)
 
-# Text recognition filtering/batches
+# Recognition filtering/batching
 TEXT_REC_SCORE_THRESH = 0.60
 TEXT_RECOGNITION_BATCH_SIZE = 8
 TEXTLINE_ORIENTATION_BATCH_SIZE = 8
 
-# Backend knobs (leave MKLDNN off on ARM64 unless you validate stability)
+# Backend toggles (MKLDNN often offers limited benefit on ARM64; keep off unless validated)
 ENABLE_MKLDNN = False
 MKLDNN_CACHE_CAPACITY = 5
-ENABLE_HPI = False  # usually unavailable on ARM64
+ENABLE_HPI = False                  # typically unavailable on ARM64
 
-# Warmup
-WARMUP_AT_START = False  # set True if your build is stable on warmup
+# Startup warmup (disable if your build crashes on first forward)
+WARMUP_AT_START = False
 
 # I/O policy
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
 
-# ================= Utilities =================
+
+# ================= Small utilities =================
 def _ext_ok(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
@@ -115,6 +104,19 @@ def _filter_by_signature(params: Dict[str, Any], fn) -> Dict[str, Any]:
     import inspect
     allowed = set(inspect.signature(fn).parameters.keys())
     return {k: v for k, v in params.items() if (k in allowed and _provided(v))}
+
+def _map_version_variant_keys(cand: Dict[str, Any]) -> Dict[str, Any]:
+    # Map chart_recognition <-> chart_parsing depending on installed signature
+    import inspect
+    params = set(inspect.signature(PPStructureV3.__init__).parameters.keys())
+    out = dict(cand)
+    if "use_chart_parsing" in params and "use_chart_recognition" not in params:
+        if "use_chart_recognition" in out:
+            out["use_chart_parsing"] = out.pop("use_chart_recognition")
+    # Some builds name text recognition batch as text_rec_batch_size
+    if "text_rec_batch_size" in params and "text_recognition_batch_size" in out:
+        out["text_rec_batch_size"] = out.pop("text_recognition_batch_size")
+    return out
 
 def _open_image_any(val: Union[Image.Image, bytes, str]) -> Optional[Image.Image]:
     try:
@@ -171,14 +173,14 @@ def _collect_results(pipeline: PPStructureV3, outputs, inline_images: bool) -> T
 
     merged_md = ""
     if md_list:
-        # Prefer native concatenation helper; fallback to simple join
+        # Native helper when available
         try:
             merged_md = pipeline.concatenate_markdown_pages(md_list)
         except AttributeError:
             try:
-                paddlex = getattr(pipeline, "paddlex_pipeline", None)
-                if paddlex and hasattr(paddlex, "concatenate_markdown_pages"):
-                    merged_md = paddlex.concatenate_markdown_pages(md_list)
+                px = getattr(pipeline, "paddlex_pipeline", None)
+                if px and hasattr(px, "concatenate_markdown_pages"):
+                    merged_md = px.concatenate_markdown_pages(md_list)
                 else:
                     merged_md = ""
             except Exception:
@@ -189,7 +191,7 @@ def _collect_results(pipeline: PPStructureV3, outputs, inline_images: bool) -> T
         if isinstance(merged_md, dict) and "markdown_texts" in merged_md:
             merged_md = merged_md["markdown_texts"]
         elif not isinstance(merged_md, str):
-            # fallback: pull page markdown_text/markdown and join
+            # Safe fallback: join page markdown_text/markdown if present
             parts: List[str] = []
             for md in md_list:
                 txt = md.get("markdown_text") or md.get("markdown") or ""
@@ -216,11 +218,9 @@ def _warmup_pipeline(pipeline: PPStructureV3) -> None:
         except Exception:
             pass
 
-# ================= Signature-aware arg builders =================
+
+# ================= Signature-aware builders =================
 def _build_init_defaults() -> Dict[str, Any]:
-    """
-    Build minimal, safe defaults aligned with the installed PPStructureV3 signature.
-    """
     cand: Dict[str, Any] = {
         # device/lang/threads/backend
         "device": DEVICE,
@@ -235,29 +235,23 @@ def _build_init_defaults() -> Dict[str, Any]:
         "use_doc_unwarping": USE_DOC_UNWARPING,
         "use_textline_orientation": USE_TEXTLINE_ORIENTATION,
         "use_table_recognition": USE_TABLE_RECOGNITION,
-        "use_formula_recognition": USE_FORMULA_RECOGNITION,
-        "use_chart_recognition": USE_CHART_RECOGNITION,  # mapped below if variant differs
-        "use_seal_recognition": USE_SEAL_RECOGNITION,
         "use_region_detection": USE_REGION_DETECTION,
+        "use_formula_recognition": USE_FORMULA_RECOGNITION,
+        "use_chart_recognition": USE_CHART_RECOGNITION,
+        "use_seal_recognition": USE_SEAL_RECOGNITION,
 
         # Core models
         "layout_detection_model_name": LAYOUT_DETECTION_MODEL_NAME,
         "text_detection_model_name": TEXT_DETECTION_MODEL_NAME,
         "text_recognition_model_name": TEXT_RECOGNITION_MODEL_NAME,
 
-        # Optional model dirs (only if non-empty)
+        # Optional dirs
         "layout_detection_model_dir": LAYOUT_DETECTION_MODEL_DIR,
         "region_detection_model_dir": REGION_DETECTION_MODEL_DIR,
         "text_detection_model_dir": TEXT_DETECTION_MODEL_DIR,
         "text_recognition_model_dir": TEXT_RECOGNITION_MODEL_DIR,
 
-        # Layout thresholds (only if provided)
-        "layout_threshold": LAYOUT_THRESHOLD,
-        "layout_nms": LAYOUT_NMS,
-        "layout_unclip_ratio": LAYOUT_UNCLIP_RATIO,
-        "layout_merge_bboxes_mode": LAYOUT_MERGE_BBOXES_MODE,
-
-        # Text detection DB params
+        # Text detection (DB)
         "text_det_limit_side_len": TEXT_DET_LIMIT_SIDE_LEN,
         "text_det_limit_type": TEXT_DET_LIMIT_TYPE,
         "text_det_db_thresh": TEXT_DET_DB_THRESH,
@@ -265,30 +259,19 @@ def _build_init_defaults() -> Dict[str, Any]:
         "text_det_db_unclip_ratio": TEXT_DET_DB_UNCLIP_RATIO,
         "text_det_db_score_mode": TEXT_DET_DB_SCORE_MODE,
 
-        # Recognition/batch params
+        # Recognition/batching
         "text_rec_score_thresh": TEXT_REC_SCORE_THRESH,
-        "text_rec_batch_size": TEXT_RECOGNITION_BATCH_SIZE,
+        "text_recognition_batch_size": TEXT_RECOGNITION_BATCH_SIZE,
         "textline_orientation_batch_size": TEXTLINE_ORIENTATION_BATCH_SIZE,
     }
-
-    # Map chart_recognition -> chart_parsing if needed
-    try:
-        import inspect
-        init_params = set(inspect.signature(PPStructureV3.__init__).parameters.keys())
-        if "use_chart_parsing" in init_params and "use_chart_recognition" not in init_params:
-            cand["use_chart_parsing"] = cand.pop("use_chart_recognition")
-    except Exception:
-        pass
-
+    cand = _map_version_variant_keys(cand)
     return _filter_by_signature({k: v for k, v in cand.items() if _provided(v)}, PPStructureV3.__init__)
 
 def _build_variant_init_kwargs(overrides: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Merge user overrides with defaults, then filter strictly by installed signature.
-    """
     base = _build_init_defaults()
     merged = dict(base)
     merged.update({k: v for k, v in overrides.items() if _provided(v)})
+    merged = _map_version_variant_keys(merged)
     return _filter_by_signature(merged, PPStructureV3.__init__)
 
 def _build_predict_kwargs(page_num: Optional[int]) -> Dict[str, Any]:
@@ -296,6 +279,7 @@ def _build_predict_kwargs(page_num: Optional[int]) -> Dict[str, Any]:
     if page_num and page_num > 0:
         cand["page_num"] = page_num
     return _filter_by_signature(cand, PPStructureV3.predict)
+
 
 # ================= App & lifecycle =================
 _PIPELINE_LOCK = threading.Lock()
@@ -305,7 +289,6 @@ def _cache_key_from_kwargs(d: Dict[str, Any]) -> Tuple[Tuple[str, Any], ...]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Build a single default pipeline at startup (optional warmup)
     init_kwargs = _build_init_defaults()
     pipe = PPStructureV3(**init_kwargs)
     if WARMUP_AT_START:
@@ -316,8 +299,8 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(
-    title="PPStructureV3 (Official-like) API",
-    version="4.0.0",
+    title="PP-StructureV3 (Official-like) API",
+    version="4.2.0",
     lifespan=lifespan,
     description="Signature-safe PP-StructureV3 wrapper tuned for medical lab reports on ARM64 CPU."
 )
@@ -337,23 +320,22 @@ def _get_or_create_pipeline(overrides: Dict[str, Any]) -> PPStructureV3:
         if pipe is not None:
             return pipe
         pipe = PPStructureV3(**init_kwargs)
-        # no warmup here; first request will initialize
         _PIPELINE_CACHE[key] = pipe
         return pipe
 
-# ================= Endpoint (official-like pattern) =================
+
+# ================= Endpoint (mirrors official pattern) =================
 @app.post("/parse")
 async def parse(
     file: UploadFile = File(...),
     output_format: Literal["json", "markdown", "both"] = Query("both"),
     markdown_images: Literal["none", "inline"] = Query("none", description="Inline base64 images in Markdown"),
 
-    # Safe runtime overrides (kept small and aligned with official params)
+    # Minimal, safe overrides (kept aligned with public docs; all optional)
     device: Optional[str] = Query(None),
     cpu_threads: Optional[int] = Query(None, gt=0),
     enable_mkldnn: Optional[bool] = Query(None),
 
-    # Feature toggles
     use_doc_orientation_classify: Optional[bool] = Query(None),
     use_doc_unwarping: Optional[bool] = Query(None),
     use_textline_orientation: Optional[bool] = Query(None),
@@ -363,24 +345,15 @@ async def parse(
     use_chart_recognition: Optional[bool] = Query(None),
     use_seal_recognition: Optional[bool] = Query(None),
 
-    # Core models
     layout_detection_model_name: Optional[str] = Query(None),
     text_detection_model_name: Optional[str] = Query(None),
     text_recognition_model_name: Optional[str] = Query(None),
 
-    # Optional model dirs
     layout_detection_model_dir: Optional[str] = Query(None),
     region_detection_model_dir: Optional[str] = Query(None),
     text_detection_model_dir: Optional[str] = Query(None),
     text_recognition_model_dir: Optional[str] = Query(None),
 
-    # Layout thresholds
-    layout_threshold: Optional[float] = Query(None, ge=0.0, le=1.0),
-    layout_nms: Optional[bool] = Query(None),
-    layout_unclip_ratio: Optional[float] = Query(None, gt=0.0),
-    layout_merge_bboxes_mode: Optional[str] = Query(None),
-
-    # Text detection DB params
     text_det_limit_side_len: Optional[int] = Query(None, gt=0),
     text_det_limit_type: Optional[str] = Query(None),
     text_det_db_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
@@ -388,12 +361,10 @@ async def parse(
     text_det_db_unclip_ratio: Optional[float] = Query(None, gt=0.0),
     text_det_db_score_mode: Optional[str] = Query(None),
 
-    # Recognition
     text_rec_score_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
     text_recognition_batch_size: Optional[int] = Query(None, gt=0),
     textline_orientation_batch_size: Optional[int] = Query(None, gt=0),
 
-    # Page control
     page_num: Optional[int] = Query(None, gt=0),
 ):
     if _file_too_big(file):
@@ -407,7 +378,7 @@ async def parse(
         with open(in_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
-        # Build minimal, version-safe overrides (only include provided values)
+        # Build safe overrides (only provided values, later filtered by signature)
         overrides: Dict[str, Any] = {}
         for k, v in dict(
             device=device,
@@ -432,11 +403,6 @@ async def parse(
             text_detection_model_dir=text_detection_model_dir or "",
             text_recognition_model_dir=text_recognition_model_dir or "",
 
-            layout_threshold=layout_threshold if layout_threshold is not None else "",
-            layout_nms=layout_nms if layout_nms is not None else "",
-            layout_unclip_ratio=layout_unclip_ratio if layout_unclip_ratio is not None else "",
-            layout_merge_bboxes_mode=layout_merge_bboxes_mode or "",
-
             text_det_limit_side_len=text_det_limit_side_len if text_det_limit_side_len is not None else "",
             text_det_limit_type=text_det_limit_type or "",
             text_det_db_thresh=text_det_db_thresh if text_det_db_thresh is not None else "",
@@ -444,9 +410,9 @@ async def parse(
             text_det_db_unclip_ratio=text_det_db_unclip_ratio if text_det_db_unclip_ratio is not None else "",
             text_det_db_score_mode=text_det_db_score_mode or "",
 
-            text_rec_score_thresh=text_rec_score_thresh if text_rec_score_thresh is not None else "",
-            text_rec_batch_size=text_recognition_batch_size if text_recognition_batch_size is not None else "",
+            text_recognition_batch_size=text_recognition_batch_size if text_recognition_batch_size is not None else "",
             textline_orientation_batch_size=textline_orientation_batch_size if textline_orientation_batch_size is not None else "",
+            text_rec_score_thresh=text_rec_score_thresh if text_rec_score_thresh is not None else "",
         ).items():
             if _provided(v):
                 overrides[k] = v
