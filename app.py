@@ -5,110 +5,51 @@ import json
 import shutil
 import tempfile
 import threading
-import platform
-from collections import OrderedDict
 from pathlib import Path
-from typing import Optional, Literal, Dict, Any, Tuple, List, Union
+from typing import Optional, Literal, Dict, Any, List
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
-from PIL import Image, UnidentifiedImageError
 
 from paddleocr import PPStructureV3
 
-# ================= ARM64-aware defaults (tuned for medical lab reports) =================
-DEVICE = "cpu"
-CPU_THREADS = 4
+# ================= Service defaults (kept to official interfaces only) =================
+# Environment-driven init knobs (official PPStructureV3 __init__ parameters)
+DEVICE = os.getenv("PPOCR_DEVICE", "cpu")
+ENABLE_MKLDNN = bool(int(os.getenv("PPOCR_ENABLE_MKLDNN", "1")))   # If unavailable, Paddle ignores it (official behavior)
+PRECISION = os.getenv("PPOCR_PRECISION", "fp32")
+CPU_THREADS = int(os.getenv("PPOCR_CPU_THREADS", "8"))
+PADDLEX_CONFIG = os.getenv("PPOCR_PADDLEX_CONFIG", None)
 
-# Subpipelines
-USE_DOC_ORIENTATION_CLASSIFY = True     # robust to rotated/scanned pages
-USE_DOC_UNWARPING = False               # off to save CPU; enable only for warped photos
-USE_TEXTLINE_ORIENTATION = True         # improves rotated headers/side labels
-USE_TABLE_RECOGNITION = True            # lab reports are table-heavy
-USE_FORMULA_RECOGNITION = False
-USE_CHART_RECOGNITION = False
-USE_SEAL_RECOGNITION = False
-USE_REGION_DETECTION = False            # keep off by default for stability on ARM64 CPU
+# Medical lab report bias: English recognition model; override via env if desired.
+# Use official model names. Leave as None to stick with PaddleOCR defaults.
+TEXT_RECOGNITION_MODEL_NAME = os.getenv("PPOCR_TEXT_RECOGNITION_MODEL_NAME", "en_PP-OCRv5_mobile_rec")
 
-# Models
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
-TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = "SLANet_plus"
-TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
-WIRED_TABLE_CELLS_DET_MODEL_NAME = None
-WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
-TABLE_ORIENTATION_CLASSIFY_MODEL_NAME = None
-FORMULA_RECOGNITION_MODEL_NAME = None
-SEAL_TEXT_DETECTION_MODEL_NAME = None
-SEAL_TEXT_RECOGNITION_MODEL_NAME = None
-CHART_RECOGNITION_MODEL_NAME = None
-
-# Optional model dirs
-LAYOUT_DETECTION_MODEL_DIR = None
-REGION_DETECTION_MODEL_DIR = None
-TEXT_DETECTION_MODEL_DIR = None
-TEXT_RECOGNITION_MODEL_DIR = None
-TABLE_CLASSIFICATION_MODEL_DIR = None
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
-WIRED_TABLE_CELLS_DET_MODEL_DIR = None
-WIRELESS_TABLE_CELLS_DET_MODEL_DIR = None
-TABLE_ORIENTATION_CLASSIFY_MODEL_DIR = None
-FORMULA_RECOGNITION_MODEL_DIR = None
-DOC_ORIENTATION_CLASSIFY_MODEL_DIR = None
-DOC_UNWARPING_MODEL_DIR = None
-TEXTLINE_ORIENTATION_MODEL_DIR = None
-SEAL_TEXT_DETECTION_MODEL_DIR = None
-SEAL_TEXT_RECOGNITION_MODEL_DIR = None
-CHART_RECOGNITION_MODEL_DIR = None
-
-# Thresholds / sizes / batches (favor recall; filter low-confidence rec)
-LAYOUT_THRESHOLD = None
-LAYOUT_NMS = None
-LAYOUT_UNCLIP_RATIO = None
-LAYOUT_MERGE_BBOXES_MODE = None
-
-# Text detection tuning for small fonts typical in lab reports
-TEXT_DET_THRESH = 0.30
-TEXT_DET_BOX_THRESH = 0.40
-TEXT_DET_UNCLIP_RATIO = 2.0
-TEXT_DET_LIMIT_SIDE_LEN = 1536          # higher side length to capture fine text
-TEXT_DET_LIMIT_TYPE = None
-
-# Seals (unused)
-SEAL_DET_LIMIT_SIDE_LEN = None
-SEAL_DET_LIMIT_TYPE = None
-SEAL_DET_THRESH = None
-SEAL_DET_BOX_THRESH = None
-SEAL_DET_UNCLIP_RATIO = None
-SEAL_REC_SCORE_THRESH = None
-
-# Text recognition score filter and batches
-TEXT_REC_SCORE_THRESH = 0.60
-TEXT_RECOGNITION_BATCH_SIZE = 8
-TEXTLINE_ORIENTATION_BATCH_SIZE = 8
-FORMULA_RECOGNITION_BATCH_SIZE = None
-CHART_RECOGNITION_BATCH_SIZE = None
-SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
-
-# Backend knobs (ARM64 optimized)
-ENABLE_HPI = False                        # HPI not supported on ARM64
-_ENABLE_MKLDNN_DEFAULT = False            # ARM64 doesn't benefit from MKLDNN like x86_64
-ENABLE_MKLDNN = bool(int(os.getenv("ENABLE_MKLDNN", "0")))  # Default off for ARM64 unless explicitly set
-USE_TENSORRT = False                      # TensorRT not available on ARM64 CPU
-PRECISION = "fp32"                        # Keep FP32 for maximum medical text accuracy
-MKLDNN_CACHE_CAPACITY = 5                 # Reduce cache size for ARM64 memory efficiency
-PADDLEX_CONFIG = None
-
-# I/O and service limits
-ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
+# I/O
+ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 MAX_FILE_SIZE_MB = 50
-MAX_PARALLEL_PREDICT = 1
-PIPELINE_CACHE_SIZE = 2
+MAX_PARALLEL_PREDICT = int(os.getenv("PPOCR_MAX_PARALLEL", "1"))
+
+# Modest concurrency guard
+_sem = threading.Semaphore(MAX_PARALLEL_PREDICT)
+
+# ================= App & Lifespan =================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Instantiate PPStructureV3 with official init args only
+    app.state.pipeline = PPStructureV3(
+        device=DEVICE,
+        enable_mkldnn=ENABLE_MKLDNN,
+        precision=PRECISION,
+        cpu_threads=CPU_THREADS,
+        paddlex_config=PADDLEX_CONFIG,
+        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME if TEXT_RECOGNITION_MODEL_NAME else None,
+    )
+    yield
+
+app = FastAPI(title="PPStructureV3 /parse API (official-only)", version="3.0", lifespan=lifespan)
 
 # ================= Helpers =================
 def _ext_ok(filename: str) -> bool:
@@ -120,456 +61,149 @@ def _file_too_big(upload: UploadFile) -> bool:
         return int(size_hdr) > MAX_FILE_SIZE_MB * 1024 * 1024
     return False
 
-def _build_config_key(params: Dict[str, Any]) -> Tuple[Tuple[str, Any], ...]:
-    return tuple(sorted((k, v) for k, v in params.items()))
+def _to_b64_png(pil_image) -> str:
+    buf = io.BytesIO()
+    pil_image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
-def _make_pipeline(**kwargs) -> PPStructureV3:
-    return PPStructureV3(**kwargs)
-
-def _open_image_any(val: Union[Image.Image, bytes, str]) -> Optional[Image.Image]:
-    try:
-        if isinstance(val, Image.Image):
-            return val
-        if isinstance(val, bytes):
-            return Image.open(io.BytesIO(val)).convert("RGBA")
-        if isinstance(val, str) and os.path.exists(val):
-            return Image.open(val).convert("RGBA")
-    except (UnidentifiedImageError, OSError):
-        return None
-    return None
-
-def _embed_images_in_markdown(md_text: str, images_map: Dict[str, Union[Image.Image, bytes, str]]) -> str:
-    for path, val in images_map.items():
-        pil_img = _open_image_any(val)
-        if pil_img is None:
-            continue
-        buf = io.BytesIO()
-        pil_img.save(buf, format="PNG")
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        data_uri = f"data:image/png;base64,{b64}"
-        md_text = md_text.replace(f'src="{path}"', f'src="{data_uri}"')
-        md_text = md_text.replace(f"({path})", f"({data_uri})")
-    return md_text
-
-def _page_json_with_fallback(res) -> Dict[str, Any]:
-    j = getattr(res, "json", None)
-    if isinstance(j, dict):
-        return j
-    # Fallback for nightlies: persist and read the last JSON
-    with tempfile.TemporaryDirectory() as td:
-        try:
-            res.save_to_json(save_path=td)
-            files = sorted(Path(td).glob("*.json"))
-            if files:
-                return json.loads(files[-1].read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-def _collect_results(pipeline: PPStructureV3, outputs, inline_images: bool):
-    page_json: List[Dict[str, Any]] = []
-    markdown_list: List[Dict[str, Any]] = []
-    markdown_images_list: List[Dict[str, Union[Image.Image, bytes, str]]] = []
-
-    for res in outputs:
-        page_json.append(_page_json_with_fallback(res))
-        md_dict = getattr(res, "markdown", None)
-        if md_dict and isinstance(md_dict, dict):
-            markdown_list.append(md_dict)
-            imgs = md_dict.get("markdown_images", {})
-            markdown_images_list.append(imgs if isinstance(imgs, dict) else {})
-        else:
-            markdown_list.append({})
-            markdown_images_list.append({})
-
-    merged_md = ""
-    if markdown_list:
-        try:
-            merged_md = pipeline.concatenate_markdown_pages(markdown_list)
-        except AttributeError:
-            try:
-                paddlex = getattr(pipeline, "paddlex_pipeline", None)
-                if paddlex and hasattr(paddlex, "concatenate_markdown_pages"):
-                    merged_md = paddlex.concatenate_markdown_pages(markdown_list)
-            except Exception:
-                merged_md = ""
-        except Exception:
-            merged_md = ""
-
-    if inline_images and merged_md:
-        merged_images: Dict[str, Union[Image.Image, bytes, str]] = {}
-        for imgs in markdown_images_list:
-            merged_images.update(imgs or {})
-        if merged_images:
-            merged_md = _embed_images_in_markdown(merged_md, merged_images)
-
-    return page_json, merged_md
-
-def _warmup_pipeline(pipeline: PPStructureV3) -> None:
-    # Warm up with a real PNG file path (more stable than ndarray on some stacks)
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-        Image.new("RGB", (64, 64), color="white").save(tf.name)
-        path = tf.name
-    try:
-        pipeline.predict(input=path)
-    except Exception:
-        pass
-    finally:
-        try:
-            os.remove(path)
-        except Exception:
-            pass
-
-# ================= App & Lifespan =================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state.pipeline = _make_pipeline(
-        device=DEVICE,
-        enable_mkldnn=ENABLE_MKLDNN,
-        enable_hpi=ENABLE_HPI,
-        use_tensorrt=USE_TENSORRT,
-        precision=PRECISION,
-        mkldnn_cache_capacity=MKLDNN_CACHE_CAPACITY,
-        cpu_threads=CPU_THREADS,
-        paddlex_config=PADDLEX_CONFIG,
-        layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
-        layout_detection_model_dir=LAYOUT_DETECTION_MODEL_DIR,
-        region_detection_model_dir=REGION_DETECTION_MODEL_DIR,
-        text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
-        text_detection_model_dir=TEXT_DETECTION_MODEL_DIR,
-        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
-        text_recognition_model_dir=TEXT_RECOGNITION_MODEL_DIR,
-        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
-        table_classification_model_dir=TABLE_CLASSIFICATION_MODEL_DIR,
-        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wired_table_structure_recognition_model_dir=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR,
-        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wireless_table_structure_recognition_model_dir=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR,
-        wired_table_cells_detection_model_name=WIRED_TABLE_CELLS_DET_MODEL_NAME,
-        wired_table_cells_detection_model_dir=WIRED_TABLE_CELLS_DET_MODEL_DIR,
-        wireless_table_cells_detection_model_name=WIRELESS_TABLE_CELLS_DET_MODEL_NAME,
-        wireless_table_cells_detection_model_dir=WIRELESS_TABLE_CELLS_DET_MODEL_DIR,
-        table_orientation_classify_model_name=TABLE_ORIENTATION_CLASSIFY_MODEL_NAME,
-        table_orientation_classify_model_dir=TABLE_ORIENTATION_CLASSIFY_MODEL_DIR,
-        formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
-        formula_recognition_model_dir=FORMULA_RECOGNITION_MODEL_DIR,
-        doc_orientation_classify_model_dir=DOC_ORIENTATION_CLASSIFY_MODEL_DIR,
-        doc_unwarping_model_dir=DOC_UNWARPING_MODEL_DIR,
-        textline_orientation_model_dir=TEXTLINE_ORIENTATION_MODEL_DIR,
-        seal_text_detection_model_name=SEAL_TEXT_DETECTION_MODEL_NAME,
-        seal_text_detection_model_dir=SEAL_TEXT_DETECTION_MODEL_DIR,
-        seal_text_recognition_model_name=SEAL_TEXT_RECOGNITION_MODEL_NAME,
-        seal_text_recognition_model_dir=SEAL_TEXT_RECOGNITION_MODEL_DIR,
-        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-        chart_recognition_model_dir=CHART_RECOGNITION_MODEL_DIR,
-        layout_threshold=LAYOUT_THRESHOLD,
-        layout_nms=LAYOUT_NMS,
-        layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
-        layout_merge_bboxes_mode=LAYOUT_MERGE_BBOXES_MODE,
-        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
-        text_det_thresh=TEXT_DET_THRESH,
-        text_det_box_thresh=TEXT_DET_BOX_THRESH,
-        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-        text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
-        text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-        textline_orientation_batch_size=TEXTLINE_ORIENTATION_BATCH_SIZE,
-        formula_recognition_batch_size=FORMULA_RECOGNITION_BATCH_SIZE,
-        chart_recognition_batch_size=CHART_RECOGNITION_BATCH_SIZE,
-        seal_text_recognition_batch_size=SEAL_TEXT_RECOGNITION_BATCH_SIZE,
-        seal_rec_score_thresh=SEAL_REC_SCORE_THRESH,
-        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-        use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-        use_table_recognition=USE_TABLE_RECOGNITION,
-        use_formula_recognition=USE_FORMULA_RECOGNITION,
-        use_chart_recognition=USE_CHART_RECOGNITION,
-        use_seal_recognition=USE_SEAL_RECOGNITION,
-        use_region_detection=USE_REGION_DETECTION,
-    )
-    # Warmup triggers model downloads and initializes graphs
-    _warmup_pipeline(app.state.pipeline)
-
-    app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
-    app.state.pipeline_cache = OrderedDict()
-    yield
-
-app = FastAPI(title="PPStructureV3 /parse API", version="2.0.0", lifespan=lifespan)
-
+# ================= Endpoints =================
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-def _get_or_create_pipeline(app: FastAPI, effective: Dict[str, Any]) -> PPStructureV3:
-    if not effective:
-        return app.state.pipeline
-    cache: OrderedDict = app.state.pipeline_cache
-    eff_key = _build_config_key(effective)
-    if eff_key in cache:
-        pipe = cache.pop(eff_key)
-        cache[eff_key] = pipe
-        return pipe
-    while len(cache) >= PIPELINE_CACHE_SIZE:
-        cache.popitem(last=False)
-    base_defaults = dict(
-        device=DEVICE,
-        enable_mkldnn=ENABLE_MKLDNN,
-        enable_hpi=ENABLE_HPI,
-        use_tensorrt=USE_TENSORRT,
-        precision=PRECISION,
-        mkldnn_cache_capacity=MKLDNN_CACHE_CAPACITY,
-        cpu_threads=CPU_THREADS,
-        paddlex_config=PADDLEX_CONFIG,
-        layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
-        text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
-        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
-        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
-        formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
-        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-        layout_threshold=LAYOUT_THRESHOLD,
-        layout_nms=LAYOUT_NMS,
-        layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
-        layout_merge_bboxes_mode=LAYOUT_MERGE_BBOXES_MODE,
-        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
-        text_det_thresh=TEXT_DET_THRESH,
-        text_det_box_thresh=TEXT_DET_BOX_THRESH,
-        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-        text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
-        text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
-        textline_orientation_batch_size=TEXTLINE_ORIENTATION_BATCH_SIZE,
-        formula_recognition_batch_size=FORMULA_RECOGNITION_BATCH_SIZE,
-        chart_recognition_batch_size=CHART_RECOGNITION_BATCH_SIZE,
-        seal_text_recognition_batch_size=SEAL_TEXT_RECOGNITION_BATCH_SIZE,
-        seal_rec_score_thresh=SEAL_REC_SCORE_THRESH,
-        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
-        use_doc_unwarping=USE_DOC_UNWARPING,
-        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
-        use_table_recognition=USE_TABLE_RECOGNITION,
-        use_formula_recognition=USE_FORMULA_RECOGNITION,
-        use_chart_recognition=USE_CHART_RECOGNITION,
-        use_seal_recognition=USE_SEAL_RECOGNITION,
-        use_region_detection=USE_REGION_DETECTION,
-    )
-    base_defaults.update(effective)
-    final_params = {k: v for k, v in base_defaults.items() if v is not None}
-    pipe = _make_pipeline(**final_params)
-    # Optional: warm up new variant once
-    try:
-        _warmup_pipeline(pipe)
-    except Exception:
-        pass
-    cache[eff_key] = pipe
-    return pipe
-
-def _predict_table_kwargs(
-    use_ocr_results_with_table_cells: Optional[bool],
-    use_e2e_wired_table_rec_model: Optional[bool],
-    use_e2e_wireless_table_rec_model: Optional[bool],
-    use_wired_table_cells_trans_to_html: Optional[bool],
-    use_wireless_table_cells_trans_to_html: Optional[bool],
-    use_table_orientation_classify: Optional[bool],
-) -> Dict[str, Any]:
-    kwargs: Dict[str, Any] = {}
-    if use_ocr_results_with_table_cells is not None:
-        kwargs["use_ocr_results_with_table_cells"] = use_ocr_results_with_table_cells
-    if use_e2e_wired_table_rec_model is not None:
-        kwargs["use_e2e_wired_table_rec_model"] = use_e2e_wired_table_rec_model
-    if use_e2e_wireless_table_rec_model is not None:
-        kwargs["use_e2e_wireless_table_rec_model"] = use_e2e_wireless_table_rec_model
-    if use_wired_table_cells_trans_to_html is not None:
-        kwargs["use_wired_table_cells_trans_to_html"] = use_wired_table_cells_trans_to_html
-    if use_wireless_table_cells_trans_to_html is not None:
-        kwargs["use_wireless_table_cells_trans_to_html"] = use_wireless_table_cells_trans_to_html
-    if use_table_orientation_classify is not None:
-        kwargs["use_table_orientation_classify"] = use_table_orientation_classify
-    return kwargs
-
-# Default to "both" so you get JSON + concatenated Markdown out of the box
 @app.post("/parse")
 async def parse(
-    file: UploadFile = File(...),
+    # Input: provide either an uploaded file or a URL
+    file: Optional[UploadFile] = File(None),
+    file_url: Optional[str] = Query(None, description="HTTP/HTTPS URL to an image or PDF"),
+
+    # Output shaping
     output_format: Literal["json", "markdown", "both"] = Query("both"),
-    markdown_images: Literal["none", "inline"] = Query("none", description="Inline images as base64"),
-    # Backend
-    device: Optional[str] = Query(None),
-    enable_mkldnn: Optional[bool] = Query(None),
-    enable_hpi: Optional[bool] = Query(None),
-    use_tensorrt: Optional[bool] = Query(None),
-    precision: Optional[str] = Query(None),
-    mkldnn_cache_capacity: Optional[int] = Query(None),
-    cpu_threads: Optional[int] = Query(None),
-    paddlex_config: Optional[str] = Query(None),
-    # Toggles
-    use_doc_orientation_classify: Optional[bool] = Query(None),
-    use_doc_unwarping: Optional[bool] = Query(None),
-    use_textline_orientation: Optional[bool] = Query(None),
-    use_table_recognition: Optional[bool] = Query(None),
-    use_formula_recognition: Optional[bool] = Query(None),
-    use_chart_recognition: Optional[bool] = Query(None),
-    use_seal_recognition: Optional[bool] = Query(None),
-    use_region_detection: Optional[bool] = Query(None),
-    # Models
-    layout_detection_model_name: Optional[str] = Query(None),
-    region_detection_model_name: Optional[str] = Query(None),
-    text_detection_model_name: Optional[str] = Query(None),
-    text_recognition_model_name: Optional[str] = Query(None),
-    table_classification_model_name: Optional[str] = Query(None),
-    wired_table_structure_recognition_model_name: Optional[str] = Query(None),
-    wireless_table_structure_recognition_model_name: Optional[str] = Query(None),
-    wired_table_cells_detection_model_name: Optional[str] = Query(None),
-    wireless_table_cells_detection_model_name: Optional[str] = Query(None),
-    table_orientation_classify_model_name: Optional[str] = Query(None),
-    formula_recognition_model_name: Optional[str] = Query(None),
-    chart_recognition_model_name: Optional[str] = Query(None),
-    doc_orientation_classify_model_name: Optional[str] = Query(None),
-    doc_unwarping_model_name: Optional[str] = Query(None),
-    textline_orientation_model_name: Optional[str] = Query(None),
-    seal_text_detection_model_name: Optional[str] = Query(None),
-    seal_text_recognition_model_name: Optional[str] = Query(None),
-    # Model dirs
-    layout_detection_model_dir: Optional[str] = Query(None),
-    region_detection_model_dir: Optional[str] = Query(None),
-    text_detection_model_dir: Optional[str] = Query(None),
-    text_recognition_model_dir: Optional[str] = Query(None),
-    table_classification_model_dir: Optional[str] = Query(None),
-    wired_table_structure_recognition_model_dir: Optional[str] = Query(None),
-    wireless_table_structure_recognition_model_dir: Optional[str] = Query(None),
-    wired_table_cells_detection_model_dir: Optional[str] = Query(None),
-    wireless_table_cells_detection_model_dir: Optional[str] = Query(None),
-    table_orientation_classify_model_dir: Optional[str] = Query(None),
-    formula_recognition_model_dir: Optional[str] = Query(None),
-    chart_recognition_model_dir: Optional[str] = Query(None),
-    doc_orientation_classify_model_dir: Optional[str] = Query(None),
-    doc_unwarping_model_dir: Optional[str] = Query(None),
-    textline_orientation_model_dir: Optional[str] = Query(None),
-    seal_text_detection_model_dir: Optional[str] = Query(None),
-    seal_text_recognition_model_dir: Optional[str] = Query(None),
-    # Thresholds / batches
-    layout_threshold: Optional[float] = Query(None, ge=0.0, le=1.0),
-    layout_nms: Optional[bool] = Query(None),
-    layout_unclip_ratio: Optional[float] = Query(None, gt=0.0),
-    layout_merge_bboxes_mode: Optional[str] = Query(None),
-    text_det_limit_side_len: Optional[int] = Query(None, gt=0),
-    text_det_limit_type: Optional[str] = Query(None),
-    text_det_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
-    text_det_box_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
-    text_det_unclip_ratio: Optional[float] = Query(None, gt=0.0),
-    text_rec_score_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
-    text_recognition_batch_size: Optional[int] = Query(None, gt=0),
-    textline_orientation_batch_size: Optional[int] = Query(None, gt=0),
-    formula_recognition_batch_size: Optional[int] = Query(None, gt=0),
-    chart_recognition_batch_size: Optional[int] = Query(None, gt=0),
-    seal_text_recognition_batch_size: Optional[int] = Query(None, gt=0),
-    seal_rec_score_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
-    seal_det_limit_side_len: Optional[int] = Query(None, gt=0),
-    seal_det_limit_type: Optional[str] = Query(None),
-    seal_det_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
-    seal_det_box_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
-    seal_det_unclip_ratio: Optional[float] = Query(None, gt=0.0),
-    # Predict-time table behavior
-    use_ocr_results_with_table_cells: Optional[bool] = Query(None),
-    use_e2e_wired_table_rec_model: Optional[bool] = Query(None),
-    use_e2e_wireless_table_rec_model: Optional[bool] = Query(None),
-    use_wired_table_cells_trans_to_html: Optional[bool] = Query(None),
-    use_wireless_table_cells_trans_to_html: Optional[bool] = Query(None),
-    use_table_orientation_classify: Optional[bool] = Query(None),
+    markdown_images: Literal["none", "separate"] = Query("none", description="Return merged markdown images separately as base64"),
+
+    # Predict-time toggles (official predict parameters)
+    use_doc_orientation_classify: Optional[bool] = Query(True, description="Enable doc orientation classifier"),
+    use_doc_unwarping: Optional[bool] = Query(False, description="Enable doc unwarping"),
+    use_textline_orientation: Optional[bool] = Query(True, description="Enable text line orientation classifier"),
+    use_table_recognition: Optional[bool] = Query(True, description="Enable table recognition"),
+    use_formula_recognition: Optional[bool] = Query(False),
+    use_chart_recognition: Optional[bool] = Query(False),
+    use_seal_recognition: Optional[bool] = Query(False),
+    use_region_detection: Optional[bool] = Query(False),
+
+    # Text det/rec tuning (optimized for small fonts in lab reports)
+    text_det_limit_side_len: Optional[int] = Query(1536, gt=0),
+    text_det_thresh: Optional[float] = Query(0.30, ge=0.0, le=1.0),
+    text_det_box_thresh: Optional[float] = Query(0.40, ge=0.0, le=1.0),
+    text_det_unclip_ratio: Optional[float] = Query(2.0, gt=0.0),
+    text_rec_score_thresh: Optional[float] = Query(0.60, ge=0.0, le=1.0),
+
+    # Table behavior (official predict parameters)
+    use_ocr_results_with_table_cells: Optional[bool] = Query(True),
+    use_e2e_wired_table_rec_model: Optional[bool] = Query(False),
+    use_e2e_wireless_table_rec_model: Optional[bool] = Query(False),
+    use_wired_table_cells_trans_to_html: Optional[bool] = Query(False),
+    use_wireless_table_cells_trans_to_html: Optional[bool] = Query(False),
+    use_table_orientation_classify: Optional[bool] = Query(True),
 ):
-    if _file_too_big(file):
-        raise HTTPException(status_code=400, detail=f"File too large (> {MAX_FILE_SIZE_MB} MB)")
-    if not _ext_ok(file.filename):
-        raise HTTPException(status_code=400, detail=f"Unsupported file type; allowed: {sorted(ALLOWED_EXTENSIONS)}")
+    if not any([file, file_url]):
+        raise HTTPException(status_code=400, detail="Provide one of: file or file_url")
 
-    tmp_dir = tempfile.mkdtemp(prefix="ppsv3_")
-    tmp_path = os.path.join(tmp_dir, file.filename)
+    tmp_dir = None
+    input_arg = None
     try:
-        with open(tmp_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+        if file:
+            if _file_too_big(file):
+                raise HTTPException(status_code=400, detail=f"File too large (> {MAX_FILE_SIZE_MB} MB)")
+            if not _ext_ok(file.filename):
+                raise HTTPException(status_code=400, detail=f"Unsupported file type; allowed: {sorted(ALLOWED_EXTENSIONS)}")
+            tmp_dir = tempfile.mkdtemp(prefix="ppsv3_")
+            input_arg = str(Path(tmp_dir) / file.filename)
+            with open(input_arg, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+        else:
+            # Official API: URLs are valid inputs to predict()
+            input_arg = file_url
 
-        # Build constructor overrides (only documented init args used here)
-        effective: Dict[str, Any] = {}
-        for k, v in dict(
-            device=device, enable_mkldnn=enable_mkldnn, enable_hpi=enable_hpi,
-            use_tensorrt=use_tensorrt, precision=precision, mkldnn_cache_capacity=mkldnn_cache_capacity,
-            cpu_threads=cpu_threads, paddlex_config=paddlex_config,
-            use_doc_orientation_classify=use_doc_orientation_classify, use_doc_unwarping=use_doc_unwarping,
-            use_textline_orientation=use_textline_orientation, use_table_recognition=use_table_recognition,
-            use_formula_recognition=use_formula_recognition, use_chart_recognition=use_chart_recognition,
-            use_seal_recognition=use_seal_recognition, use_region_detection=use_region_detection,
-            layout_detection_model_name=layout_detection_model_name, layout_detection_model_dir=layout_detection_model_dir,
-            region_detection_model_dir=region_detection_model_dir,
-            text_detection_model_name=text_detection_model_name, text_detection_model_dir=text_detection_model_dir,
-            text_recognition_model_name=text_recognition_model_name, text_recognition_model_dir=text_recognition_model_dir,
-            table_classification_model_name=table_classification_model_name, table_classification_model_dir=table_classification_model_dir,
-            wired_table_structure_recognition_model_name=wired_table_structure_recognition_model_name,
-            wired_table_structure_recognition_model_dir=wired_table_structure_recognition_model_dir,
-            wireless_table_structure_recognition_model_name=wireless_table_structure_recognition_model_name,
-            wireless_table_structure_recognition_model_dir=wireless_table_structure_recognition_model_dir,
-            wired_table_cells_detection_model_name=wired_table_cells_detection_model_name,
-            wired_table_cells_detection_model_dir=wired_table_cells_detection_model_dir,
-            wireless_table_cells_detection_model_name=wireless_table_cells_detection_model_name,
-            wireless_table_cells_detection_model_dir=wireless_table_cells_detection_model_dir,
-            table_orientation_classify_model_name=table_orientation_classify_model_name,
-            table_orientation_classify_model_dir=table_orientation_classify_model_dir,
-            formula_recognition_model_name=formula_recognition_model_name, formula_recognition_model_dir=formula_recognition_model_dir,
-            chart_recognition_model_name=chart_recognition_model_name, chart_recognition_model_dir=chart_recognition_model_dir,
-            doc_orientation_classify_model_name=doc_orientation_classify_model_name,
-            doc_orientation_classify_model_dir=doc_orientation_classify_model_dir,
-            doc_unwarping_model_name=doc_unwarping_model_name, doc_unwarping_model_dir=doc_unwarping_model_dir,
-            textline_orientation_model_name=textline_orientation_model_name,
-            textline_orientation_model_dir=textline_orientation_model_dir,
-            seal_text_detection_model_name=seal_text_detection_model_name, seal_text_detection_model_dir=seal_text_detection_model_dir,
-            seal_text_recognition_model_name=seal_text_recognition_model_name, seal_text_recognition_model_dir=seal_text_recognition_model_dir,
-            layout_threshold=layout_threshold, layout_nms=layout_nms, layout_unclip_ratio=layout_unclip_ratio,
-            layout_merge_bboxes_mode=layout_merge_bboxes_mode,
-            text_det_limit_side_len=text_det_limit_side_len, text_det_limit_type=text_det_limit_type,
-            text_det_thresh=text_det_thresh, text_det_box_thresh=text_det_box_thresh, text_det_unclip_ratio=text_det_unclip_ratio,
-            text_rec_score_thresh=text_rec_score_thresh, text_recognition_batch_size=text_recognition_batch_size,
-            textline_orientation_batch_size=textline_orientation_batch_size,
-            formula_recognition_batch_size=formula_recognition_batch_size, chart_recognition_batch_size=chart_recognition_batch_size,
-            seal_text_recognition_batch_size=seal_text_recognition_batch_size, seal_rec_score_thresh=seal_rec_score_thresh,
-            seal_det_limit_side_len=seal_det_limit_side_len, seal_det_limit_type=seal_det_limit_type,
-            seal_det_thresh=seal_det_thresh, seal_det_box_thresh=seal_det_box_thresh, seal_det_unclip_ratio=seal_det_unclip_ratio,
-        ).items():
-            if v is not None:
-                effective[k] = v
-
-        pipeline = _get_or_create_pipeline(app, effective)
-
-        predict_kwargs = _predict_table_kwargs(
-            use_ocr_results_with_table_cells,
-            use_e2e_wired_table_rec_model,
-            use_e2e_wireless_table_rec_model,
-            use_wired_table_cells_trans_to_html,
-            use_wireless_table_cells_trans_to_html,
-            use_table_orientation_classify,
+        # Build predict kwargs strictly from official predict parameters
+        predict_kwargs: Dict[str, Any] = dict(
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            use_textline_orientation=use_textline_orientation,
+            use_table_recognition=use_table_recognition,
+            use_formula_recognition=use_formula_recognition,
+            use_chart_recognition=use_chart_recognition,
+            use_seal_recognition=use_seal_recognition,
+            use_region_detection=use_region_detection,
+            text_det_limit_side_len=text_det_limit_side_len,
+            text_det_thresh=text_det_thresh,
+            text_det_box_thresh=text_det_box_thresh,
+            text_det_unclip_ratio=text_det_unclip_ratio,
+            text_rec_score_thresh=text_rec_score_thresh,
+            use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+            use_e2e_wired_table_rec_model=use_e2e_wired_table_rec_model,
+            use_e2e_wireless_table_rec_model=use_e2e_wireless_table_rec_model,
+            use_wired_table_cells_trans_to_html=use_wired_table_cells_trans_to_html,
+            use_wireless_table_cells_trans_to_html=use_wireless_table_cells_trans_to_html,
+            use_table_orientation_classify=use_table_orientation_classify,
         )
 
-        acquired = app.state.predict_sem.acquire(timeout=600)
+        acquired = _sem.acquire(timeout=600)
         if not acquired:
             raise HTTPException(status_code=503, detail="Server busy")
+
         try:
-            outputs = await run_in_threadpool(lambda: pipeline.predict(input=tmp_path, **predict_kwargs))
+            pipeline: PPStructureV3 = app.state.pipeline
+            outputs = await run_in_threadpool(lambda: pipeline.predict(input=input_arg, **predict_kwargs))
         finally:
-            app.state.predict_sem.release()
+            _sem.release()
 
-        inline_flag = markdown_images == "inline"
-        page_json, merged_md = _collect_results(pipeline, outputs, inline_flag)
+        # Collect JSON results and Markdown parts (official attributes)
+        page_json: List[Dict[str, Any]] = []
+        markdown_list: List[Dict[str, Any]] = []
+        for res in outputs:
+            # direct attributes from official API
+            page_json.append(res.json)
+            md = res.markdown or {}
+            markdown_list.append(md)
 
+        merged_md_text = ""
+        merged_md_images: Dict[str, Any] = {}
+
+        if output_format in ("markdown", "both"):
+            # Official concatenation API
+            ret = app.state.pipeline.concatenate_markdown_pages(markdown_list)
+            if isinstance(ret, tuple) and len(ret) >= 2:
+                merged_md_text, merged_md_images = ret[0], (ret[1] or {})
+            else:
+                # Some docs/examples show a single string return; we stick to official behavior here.
+                merged_md_text = ret if isinstance(ret, str) else ""
+
+        # Shape responses
         if output_format == "json":
             return JSONResponse({"results": page_json, "pages": len(page_json)})
-        elif output_format == "markdown":
-            return PlainTextResponse(merged_md or "")
+
+        if output_format == "markdown":
+            return PlainTextResponse(merged_md_text or "")
+
+        # both
+        if markdown_images == "separate" and merged_md_images:
+            images_b64: Dict[str, str] = {}
+            for k, v in merged_md_images.items():
+                try:
+                    images_b64[k] = _to_b64_png(v)
+                except Exception:
+                    pass
+            return JSONResponse(
+                {"results": page_json, "markdown": {"text": merged_md_text or "", "images": images_b64}, "pages": len(page_json)}
+            )
         else:
-            return JSONResponse({"results": page_json, "markdown": merged_md or "", "pages": len(page_json)})
+            return JSONResponse({"results": page_json, "markdown": merged_md_text or "", "pages": len(page_json)})
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference failed: {type(e).__name__}: {str(e)}")
     finally:
-        try:
+        if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
