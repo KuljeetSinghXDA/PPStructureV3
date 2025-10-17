@@ -1,36 +1,41 @@
-# syntax=docker/dockerfile:1.7
-
-# Build (arm64):
-#   docker buildx build --platform linux/arm64 -t ppstructv3:cpu .
-# Run:
-#   docker run --rm -p 8080:8080 -e OMP_NUM_THREADS=4 ppstructv3:cpu
+# syntax=docker/dockerfile:1
 
 FROM python:3.13-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
-# Minimal native libs needed at runtime (OpenMP, OpenCV GUI shims, CA store)
+# System dependencies for PaddleOCR runtime (OpenCV headless, PDF utils)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libgomp1 libgl1 libglib2.0-0 ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    git \
+    tzdata \
+    ca-certificates \
+    ffmpeg \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgl1 \
+    libgomp1 \
+    poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 1) PaddlePaddle from your requested nightly CPU index (no pin)
-RUN python -m pip install "paddlepaddle" \
-    -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/
+# Python deps:
+# - PaddlePaddle from the requested index, pinned to 3.3.0
+# - PaddleOCR 3.3.0 with doc-parser extras for PP-StructureV3
+# - FastAPI stack
+RUN python -m pip install --upgrade pip && \
+    pip install "paddlepaddle==3.3.0" -i https://www.paddlepaddle.org.cn/packages/nightly/cpu/ && \
+    pip install "paddleocr[doc-parser]==3.3.0" && \
+    pip install "fastapi==0.114.*" "uvicorn[standard]==0.30.*" "python-multipart==0.0.9" "pillow==10.*"
 
-# 2) PaddleOCR from release/3.3 branch + only the dependency group needed by PP-StructureV3
-#    (you can switch to [all] if you want every extra)
-RUN python -m pip install \
-    paddleocr[all] \
-    fastapi uvicorn[standard] \
-    python-multipart
+# Conservative CPU threading hints
+ENV OMP_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
 
+# Copy application
 COPY app.py /app/app.py
 
-EXPOSE 8080
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+EXPOSE 8000
+
+# Run API
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
