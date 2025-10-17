@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     wget \
     cmake \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip and install pinned PaddlePaddle (CPU, ARM64 via custom index)
@@ -20,8 +21,8 @@ RUN pip install --no-cache-dir paddlepaddle -i https://www.paddlepaddle.org.cn/p
 # Install upgraded PaddleOCR with doc-parser extras for PP-StructureV3
 RUN pip install --no-cache-dir "paddleocr[doc-parser]==3.3.0"
 
-# Install ONNX dependencies for export and inference (wheels available for py3.12 aarch64)
-RUN pip install --no-cache-dir paddle2onnx onnxruntime paddlex
+# Install ONNX dependencies for export and inference (latest paddle2onnx with ARM64 wheels)
+RUN pip install --no-cache-dir paddle2onnx==2.0.1 onnxruntime paddlex
 
 # Install API dependencies
 RUN pip install --no-cache-dir fastapi uvicorn[standard] python-multipart beautifulsoup4 lxml
@@ -56,33 +57,36 @@ pipeline = PPStructureV3(
 pipeline.predict('/tmp/dummy.jpg')
 os.unlink('/tmp/dummy.jpg')
 
-# Dynamically find and export to ONNX: Key sub-models
+# Dynamically find and export to ONNX: Key sub-models (updated for 3.3.0 paths)
 home = os.path.expanduser('~')
 exported = []
 
-# Detection model (en_PP-OCRv5_mobile_det_infer)
-det_dirs = glob.glob(f"{home}/.paddleocr/whl/det_en/*_det_infer")
+# Detection model (PP-OCRv5_mobile_det_infer or similar)
+det_dirs = glob.glob(f"{home}/.paddleocr/whl/det_en/*PP-OCRv5_mobile_det_infer") + glob.glob(f"{home}/.paddleocr/whl/det_en/*_det_infer")
 if det_dirs:
     det_dir = det_dirs[0]
     os.system(f'paddle2onnx --model_dir {det_dir} --model_filename inference.pdmodel --params_filename inference.pdiparams --save_dir /models/det --opset_version 17')
     exported.append('det')
+else:
+    print("Warning: Det model dir not found")
 
 # Recognition model (en_PP-OCRv5_mobile_rec_infer)
-rec_dirs = glob.glob(f"{home}/.paddleocr/whl/rec_en/*_rec_infer")
+rec_dirs = glob.glob(f"{home}/.paddleocr/whl/rec_en/*en_PP-OCRv5_mobile_rec_infer") + glob.glob(f"{home}/.paddleocr/whl/rec_en/*_rec_infer")
 if rec_dirs:
     rec_dir = rec_dirs[0]
     os.system(f'paddle2onnx --model_dir {rec_dir} --model_filename inference.pdmodel --params_filename inference.pdiparams --save_dir /models/rec --opset_version 17')
     exported.append('rec')
+else:
+    print("Warning: Rec model dir not found")
 
 # Layout model (PP-DocLayout-L_infer)
-layout_dirs = glob.glob(f"{home}/.paddlex/official_models/layout/*_infer")
+layout_dirs = glob.glob(f"{home}/.paddlex/official_models/layout/*PP-DocLayout-L_infer") + glob.glob(f"{home}/.paddlex/official_models/layout/*_infer")
 if layout_dirs:
     layout_dir = layout_dirs[0]
-    # Adjust filename for PaddleX models
     os.system(f'paddle2onnx --model_dir {layout_dir} --model_filename model.pdmodel --params_filename model.pdiparams --save_dir /models/layout --opset_version 17')
     exported.append('layout')
-
-# Note: Table/formula defaults not exported; add glob if needed
+else:
+    print("Warning: Layout model dir not found")
 
 print(f"ONNX export completed for: {', '.join(exported)}")
 EOF
@@ -102,16 +106,21 @@ from bs4 import BeautifulSoup
 
 app = FastAPI(title="PP-StructureV3 API", version="3.3.0")
 
+# Check if ONNX models exist and load conditionally
+has_onnx_det = os.path.exists('/models/det')
+has_onnx_rec = os.path.exists('/models/rec')
+has_onnx_layout = os.path.exists('/models/layout')
+
 # Tuned pipeline with ONNX loading for acceleration (falls back if dirs missing)
 pipeline = PPStructureV3(
     # Specified models with ONNX dirs (auto-uses .onnx if present)
     layout_detection_model_name='PP-DocLayout-L',
-    layout_model_dir='/models/layout' if os.path.exists('/models/layout') else None,
+    layout_model_dir='/models/layout' if has_onnx_layout else None,
     text_detection_model_name='PP-OCRv5_mobile_det',
-    det_model_dir='/models/det' if os.path.exists('/models/det') else None,
+    det_model_dir='/models/det' if has_onnx_det else None,
     text_recognition_model_name='en_PP-OCRv5_mobile_rec',
-    rec_model_dir='/models/rec' if os.path.exists('/models/rec') else None,
-    # CPU optimizations (MKLDNN for native; ONNX auto-detected)
+    rec_model_dir='/models/rec' if has_onnx_rec else None,
+    # CPU optimizations (MKLDNN for native; ONNX auto-detected via dirs)
     enable_mkldnn=True,
     cpu_threads=4,  # Utilize all Ampere cores
     # Tuning for small fonts/dense tables
@@ -125,6 +134,8 @@ pipeline = PPStructureV3(
     use_e2e_wireless_table_rec_model=True,
     use_ocr_results_with_table_cells=True,
 )
+
+print(f"Pipeline loaded with ONNX: layout={has_onnx_layout}, det={has_onnx_det}, rec={has_onnx_rec}")
 
 def html_to_md(html: str) -> str:
     if not html:
