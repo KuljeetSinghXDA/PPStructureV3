@@ -18,19 +18,19 @@ from PIL import Image, UnidentifiedImageError
 
 from paddleocr import PPStructureV3
 
-# ================= ARM64-aware defaults =================
+# ================= ARM64-aware defaults (tuned for medical lab reports) =================
 DEVICE = "cpu"
 CPU_THREADS = 4
 
 # Subpipelines
-USE_DOC_ORIENTATION_CLASSIFY = False
-USE_DOC_UNWARPING = False
-USE_TEXTLINE_ORIENTATION = False
-USE_TABLE_RECOGNITION = True
+USE_DOC_ORIENTATION_CLASSIFY = True     # robust to rotated/scanned pages
+USE_DOC_UNWARPING = False               # off to save CPU; enable only for warped photos
+USE_TEXTLINE_ORIENTATION = True         # improves rotated headers/side labels
+USE_TABLE_RECOGNITION = True            # lab reports are table-heavy
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 USE_SEAL_RECOGNITION = False
-USE_REGION_DETECTION = True
+USE_REGION_DETECTION = False            # keep off by default for stability on ARM64 CPU
 
 # Models
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
@@ -42,10 +42,10 @@ TABLE_CLASSIFICATION_MODEL_NAME = "PP-LCNet_x1_0_table_cls"
 WIRED_TABLE_CELLS_DET_MODEL_NAME = None
 WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
 TABLE_ORIENTATION_CLASSIFY_MODEL_NAME = None
-FORMULA_RECOGNITION_MODEL_NAME = "PP-FormulaNet_plus-S"
+FORMULA_RECOGNITION_MODEL_NAME = None
 SEAL_TEXT_DETECTION_MODEL_NAME = None
 SEAL_TEXT_RECOGNITION_MODEL_NAME = None
-CHART_RECOGNITION_MODEL_NAME = "PP-Chart2Table"
+CHART_RECOGNITION_MODEL_NAME = None
 
 # Optional model dirs
 LAYOUT_DETECTION_MODEL_DIR = None
@@ -73,10 +73,10 @@ LAYOUT_UNCLIP_RATIO = None
 LAYOUT_MERGE_BBOXES_MODE = None
 
 # Text detection tuning for small fonts typical in lab reports
-TEXT_DET_THRESH = None
-TEXT_DET_BOX_THRESH = None
-TEXT_DET_UNCLIP_RATIO = None
-TEXT_DET_LIMIT_SIDE_LEN = None
+TEXT_DET_THRESH = 0.30
+TEXT_DET_BOX_THRESH = 0.40
+TEXT_DET_UNCLIP_RATIO = 2.0
+TEXT_DET_LIMIT_SIDE_LEN = 1536          # higher side length to capture fine text
 TEXT_DET_LIMIT_TYPE = None
 
 # Seals (unused)
@@ -87,10 +87,10 @@ SEAL_DET_BOX_THRESH = None
 SEAL_DET_UNCLIP_RATIO = None
 SEAL_REC_SCORE_THRESH = None
 
-# Text recognition score filter to improve reliability
-TEXT_REC_SCORE_THRESH = None
-TEXT_RECOGNITION_BATCH_SIZE = None
-TEXTLINE_ORIENTATION_BATCH_SIZE = None
+# Text recognition score filter and batches
+TEXT_REC_SCORE_THRESH = 0.60
+TEXT_RECOGNITION_BATCH_SIZE = 8
+TEXTLINE_ORIENTATION_BATCH_SIZE = 8
 FORMULA_RECOGNITION_BATCH_SIZE = None
 CHART_RECOGNITION_BATCH_SIZE = None
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
@@ -98,8 +98,8 @@ SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 # Backend knobs (ARM64 optimized)
 ENABLE_HPI = False                        # HPI not supported on ARM64
 _ENABLE_MKLDNN_DEFAULT = False            # ARM64 doesn't benefit from MKLDNN like x86_64
-ENABLE_MKLDNN = bool(int(os.getenv("ENABLE_MKLDNN", "0")))  # Default off for ARM64
-USE_TENSORRT = False                      # TensorRT not available on ARM64
+ENABLE_MKLDNN = bool(int(os.getenv("ENABLE_MKLDNN", "0")))  # Default off for ARM64 unless explicitly set
+USE_TENSORRT = False                      # TensorRT not available on ARM64 CPU
 PRECISION = "fp32"                        # Keep FP32 for maximum medical text accuracy
 MKLDNN_CACHE_CAPACITY = 5                 # Reduce cache size for ARM64 memory efficiency
 PADDLEX_CONFIG = None
@@ -205,6 +205,21 @@ def _collect_results(pipeline: PPStructureV3, outputs, inline_images: bool):
 
     return page_json, merged_md
 
+def _warmup_pipeline(pipeline: PPStructureV3) -> None:
+    # Warm up with a real PNG file path (more stable than ndarray on some stacks)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+        Image.new("RGB", (64, 64), color="white").save(tf.name)
+        path = tf.name
+    try:
+        pipeline.predict(input=path)
+    except Exception:
+        pass
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
 # ================= App & Lifespan =================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -251,16 +266,11 @@ async def lifespan(app: FastAPI):
         layout_nms=LAYOUT_NMS,
         layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
         layout_merge_bboxes_mode=LAYOUT_MERGE_BBOXES_MODE,
+        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
         text_det_thresh=TEXT_DET_THRESH,
         text_det_box_thresh=TEXT_DET_BOX_THRESH,
         text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
-        seal_det_limit_side_len=SEAL_DET_LIMIT_SIDE_LEN,
-        seal_det_limit_type=SEAL_DET_LIMIT_TYPE,
-        seal_det_thresh=SEAL_DET_THRESH,
-        seal_det_box_thresh=SEAL_DET_BOX_THRESH,
-        seal_det_unclip_ratio=SEAL_DET_UNCLIP_RATIO,
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
         textline_orientation_batch_size=TEXTLINE_ORIENTATION_BATCH_SIZE,
@@ -277,11 +287,14 @@ async def lifespan(app: FastAPI):
         use_seal_recognition=USE_SEAL_RECOGNITION,
         use_region_detection=USE_REGION_DETECTION,
     )
+    # Warmup triggers model downloads and initializes graphs
+    _warmup_pipeline(app.state.pipeline)
+
     app.state.predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
     app.state.pipeline_cache = OrderedDict()
     yield
 
-app = FastAPI(title="PPStructureV3 /parse API", version="1.9.0", lifespan=lifespan)
+app = FastAPI(title="PPStructureV3 /parse API", version="2.0.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
@@ -316,13 +329,21 @@ def _get_or_create_pipeline(app: FastAPI, effective: Dict[str, Any]) -> PPStruct
         formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
         chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
         layout_threshold=LAYOUT_THRESHOLD,
+        layout_nms=LAYOUT_NMS,
+        layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
+        layout_merge_bboxes_mode=LAYOUT_MERGE_BBOXES_MODE,
+        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
         text_det_thresh=TEXT_DET_THRESH,
         text_det_box_thresh=TEXT_DET_BOX_THRESH,
         text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
-        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
-        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+        textline_orientation_batch_size=TEXTLINE_ORIENTATION_BATCH_SIZE,
+        formula_recognition_batch_size=FORMULA_RECOGNITION_BATCH_SIZE,
+        chart_recognition_batch_size=CHART_RECOGNITION_BATCH_SIZE,
+        seal_text_recognition_batch_size=SEAL_TEXT_RECOGNITION_BATCH_SIZE,
+        seal_rec_score_thresh=SEAL_REC_SCORE_THRESH,
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
@@ -335,6 +356,11 @@ def _get_or_create_pipeline(app: FastAPI, effective: Dict[str, Any]) -> PPStruct
     base_defaults.update(effective)
     final_params = {k: v for k, v in base_defaults.items() if v is not None}
     pipe = _make_pipeline(**final_params)
+    # Optional: warm up new variant once
+    try:
+        _warmup_pipeline(pipe)
+    except Exception:
+        pass
     cache[eff_key] = pipe
     return pipe
 
@@ -361,10 +387,11 @@ def _predict_table_kwargs(
         kwargs["use_table_orientation_classify"] = use_table_orientation_classify
     return kwargs
 
+# Default to "both" so you get JSON + concatenated Markdown out of the box
 @app.post("/parse")
 async def parse(
     file: UploadFile = File(...),
-    output_format: Literal["json", "markdown", "both"] = Query("json"),
+    output_format: Literal["json", "markdown", "both"] = Query("both"),
     markdown_images: Literal["none", "inline"] = Query("none", description="Inline images as base64"),
     # Backend
     device: Optional[str] = Query(None),
@@ -461,7 +488,7 @@ async def parse(
         with open(tmp_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
-        # Build constructor overrides (only documented init args)
+        # Build constructor overrides (only documented init args used here)
         effective: Dict[str, Any] = {}
         for k, v in dict(
             device=device, enable_mkldnn=enable_mkldnn, enable_hpi=enable_hpi,
