@@ -16,20 +16,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
  && rm -rf /var/lib/apt/lists/*
 
-# PaddlePaddle nightly CPU (ARM64) and PaddleOCR 3.3.0 doc-parser group
+# PaddlePaddle stable CPU (ARM64) and PaddleOCR 3.2.0 doc-parser group
+# Note: Ensure stable CPU index provides cp313 aarch64 wheels in your region mirror
 RUN python -m pip install --upgrade pip && \
-    python -m pip install --pre paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
+    python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
     python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
 
 # Embedded FastAPI app:
 # - One long-lived PP-StructureV3 with requested models and accuracy tuning
 # - All supported init args exposed (None => library defaults)
 # - All documented table predict-time flags exposed (None => default)
-# - Native JSON/Markdown outputs; HPI disabled for ARM64 stability
+# - Native JSON/Markdown outputs; HPI not enabled for ARM64 stability
 RUN cat > /app.py << 'EOF'
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
-from typing import List, Dict, Any, Optional, Literal
+from typing import List, Dict, Any, Literal
 from pathlib import Path
 import tempfile
 import shutil
@@ -53,104 +54,101 @@ def _file_exceeds_limit(tmp_path: Path) -> bool:
     except Exception:
         return False
 
-app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.3.0")
+app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
 
 # ==============================
-# Supported PP-StructureV3 params (None => defaults)
+# Supported PP-StructureV3 params (Tuned for Medical Lab Reports)
 # ==============================
 # Backend/config toggles
-DEVICE: Optional[str] = None
-ENABLE_MKLDNN: Optional[bool] = None
-ENABLE_HPI: Optional[bool] = None      # Keep None/False on ARM64 to avoid PaddleX HPI plugin
-USE_TENSORRT: Optional[bool] = None
-PRECISION: Optional[str] = None
-MKLDNN_CACHE_CAPACITY: Optional[int] = None
+DEVICE = 'cpu'          # Explicitly set device
+ENABLE_MKLDNN = False   # Disable MKLDNN on ARM64 for stability/correctness
+ENABLE_HPI = None       # Keep None/False on ARM64 to avoid PaddleX HPI plugin
+USE_TENSORRT = None
+PRECISION = 'fp32'      # Use full precision for maximum accuracy
+MKLDNN_CACHE_CAPACITY = None
 
 # Threads
-CPU_THREADS: Optional[int] = 4         # Ampere A1 4 OCPU single-process
+CPU_THREADS = 4         # Ampere A1 4 OCPU single-process
 
 # Optional PaddleX config passthrough (kept None)
-PADDLEX_CONFIG: Optional[str] = None
+PADDLEX_CONFIG = None
 
 # Subpipeline toggles
-USE_DOC_ORIENTATION_CLASSIFY: Optional[bool] = None
-USE_DOC_UNWARPING: Optional[bool] = None
-USE_TEXTLINE_ORIENTATION: Optional[bool] = None
-USE_TABLE_RECOGNITION: Optional[bool] = None
-USE_FORMULA_RECOGNITION: Optional[bool] = None
-USE_CHART_RECOGNITION: Optional[bool] = None
-USE_SEAL_RECOGNITION: Optional[bool] = None
-USE_REGION_DETECTION: Optional[bool] = None
+USE_DOC_ORIENTATION_CLASSIFY = True # Enable for robustness against rotated scans
+USE_DOC_UNWARPING = None
+USE_TEXTLINE_ORIENTATION = True   # Enable for robustness against minor text skew
+USE_TABLE_RECOGNITION = True      # CRITICAL: Enable to process tables in lab reports
+USE_FORMULA_RECOGNITION = None
+USE_CHART_RECOGNITION = None
+USE_SEAL_RECOGNITION = None
+USE_REGION_DETECTION = None
 
 # Model names (requested three set; others None)
-LAYOUT_DETECTION_MODEL_NAME: Optional[str] = "PP-DocLayout-L"
-REGION_DETECTION_MODEL_NAME: Optional[str] = None
-TEXT_DETECTION_MODEL_NAME: Optional[str] = "PP-OCRv5_mobile_det"
-TEXT_RECOGNITION_MODEL_NAME: Optional[str] = "en_PP-OCRv5_mobile_rec"
-TABLE_CLASSIFICATION_MODEL_NAME: Optional[str] = None
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME: Optional[str] = None
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME: Optional[str] = None
-WIRED_TABLE_CELLS_DET_MODEL_NAME: Optional[str] = None
-WIRELESS_TABLE_CELLS_DET_MODEL_NAME: Optional[str] = None
-TABLE_ORIENTATION_CLASSIFY_MODEL_NAME: Optional[str] = None
-FORMULA_RECOGNITION_MODEL_NAME: Optional[str] = None
-DOC_ORIENTATION_CLASSIFY_MODEL_NAME: Optional[str] = None
-DOC_UNWARPING_MODEL_NAME: Optional[str] = None
-TEXTLINE_ORIENTATION_MODEL_NAME: Optional[str] = None
-SEAL_TEXT_DETECTION_MODEL_NAME: Optional[str] = None
-SEAL_TEXT_RECOGNITION_MODEL_NAME: Optional[str] = None
-CHART_RECOGNITION_MODEL_NAME: Optional[str] = None
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
+REGION_DETECTION_MODEL_NAME = None
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
+TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
+TABLE_CLASSIFICATION_MODEL_NAME = None
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
+WIRED_TABLE_CELLS_DET_MODEL_NAME = None
+WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
+TABLE_ORIENTATION_CLASSIFY_MODEL_NAME = None
+FORMULA_RECOGNITION_MODEL_NAME = None
+DOC_ORIENTATION_CLASSIFY_MODEL_NAME = None
+DOC_UNWARPING_MODEL_NAME = None
+TEXTLINE_ORIENTATION_MODEL_NAME = None
+SEAL_TEXT_DETECTION_MODEL_NAME = None
+SEAL_TEXT_RECOGNITION_MODEL_NAME = None
+CHART_RECOGNITION_MODEL_NAME = None
 
 # Model dirs
-LAYOUT_DETECTION_MODEL_DIR: Optional[str] = None
-REGION_DETECTION_MODEL_DIR: Optional[str] = None
-TEXT_DETECTION_MODEL_DIR: Optional[str] = None
-TEXT_RECOGNITION_MODEL_DIR: Optional[str] = None
-TABLE_CLASSIFICATION_MODEL_DIR: Optional[str] = None
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR: Optional[str] = None
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR: Optional[str] = None
-WIRED_TABLE_CELLS_DET_MODEL_DIR: Optional[str] = None
-WIRELESS_TABLE_CELLS_DET_MODEL_DIR: Optional[str] = None
-TABLE_ORIENTATION_CLASSIFY_MODEL_DIR: Optional[str] = None
-FORMULA_RECOGNITION_MODEL_DIR: Optional[str] = None
-DOC_ORIENTATION_CLASSIFY_MODEL_DIR: Optional[str] = None
-DOC_UNWARPING_MODEL_DIR: Optional[str] = None
-TEXTLINE_ORIENTATION_MODEL_DIR: Optional[str] = None
-SEAL_TEXT_DETECTION_MODEL_DIR: Optional[str] = None
-SEAL_TEXT_RECOGNITION_MODEL_DIR: Optional[str] = None
-CHART_RECOGNITION_MODEL_DIR: Optional[str] = None
+LAYOUT_DETECTION_MODEL_DIR = None
+REGION_DETECTION_MODEL_DIR = None
+TEXT_DETECTION_MODEL_DIR = None
+TEXT_RECOGNITION_MODEL_DIR = None
+TABLE_CLASSIFICATION_MODEL_DIR = None
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
+WIRED_TABLE_CELLS_DET_MODEL_DIR = None
+WIRELESS_TABLE_CELLS_DET_MODEL_DIR = None
+TABLE_ORIENTATION_CLASSIFY_MODEL_DIR = None
+FORMULA_RECOGNITION_MODEL_DIR = None
+DOC_ORIENTATION_CLASSIFY_MODEL_DIR = None
+DOC_UNWARPING_MODEL_DIR = None
+TEXTLINE_ORIENTATION_MODEL_DIR = None
+SEAL_TEXT_DETECTION_MODEL_DIR = None
+SEAL_TEXT_RECOGNITION_MODEL_DIR = None
+CHART_RECOGNITION_MODEL_DIR = None
 
 # Layout thresholds/controls
-LAYOUT_THRESHOLD: Optional[float] = None
-LAYOUT_NMS: Optional[bool] = None
-LAYOUT_UNCLIP_RATIO: Optional[float] = None
-LAYOUT_MERGE_BBOXES_MODE: Optional[str] = None
+LAYOUT_THRESHOLD = 0.4            # Lower to detect more layout elements in dense reports
+LAYOUT_NMS = 0.4                  # Lower to prevent merging distinct but close boxes
+LAYOUT_UNCLIP_RATIO = None
+LAYOUT_MERGE_BBOXES_MODE = None
 
-# Text detection tuning (explicit accuracy tuning applied below)
-TEXT_DET_LIMIT_SIDE_LEN: Optional[int] = None
-TEXT_DET_LIMIT_TYPE: Optional[str] = None
-TEXT_DET_THRESH: Optional[float] = None
-TEXT_DET_BOX_THRESH: Optional[float] = None
-TEXT_DET_UNCLIP_RATIO: Optional[float] = None
+# Text detection tuning
+TEXT_DET_LIMIT_SIDE_LEN = 2560    # CRITICAL: Increase resolution for small fonts
+TEXT_DET_LIMIT_TYPE = 'max'       # Ensure the longest side fits within the limit
+TEXT_DET_THRESH = None
+TEXT_DET_BOX_THRESH = 0.5         # Lower to detect text boxes with lower confidence (faint/small text)
+TEXT_DET_UNCLIP_RATIO = 1.2       # Reduce box expansion to avoid merging adjacent tiny text
 
 # Seal detection tuning
-SEAL_DET_LIMIT_SIDE_LEN: Optional[int] = None
-SEAL_DET_LIMIT_TYPE: Optional[str] = None
-SEAL_DET_THRESH: Optional[float] = None
-SEAL_DET_BOX_THRESH: Optional[float] = None
-SEAL_DET_UNCLIP_RATIO: Optional[float] = None
+SEAL_DET_LIMIT_SIDE_LEN = None
+SEAL_DET_LIMIT_TYPE = None
+SEAL_DET_THRESH = None
+SEAL_DET_BOX_THRESH = None
+SEAL_DET_UNCLIP_RATIO = None
 
 # Recognition thresholds/batches
-TEXT_REC_SCORE_THRESH: Optional[float] = None
-TEXT_RECOGNITION_BATCH_SIZE: Optional[int] = None
-TEXTLINE_ORIENTATION_BATCH_SIZE: Optional[int] = None
-FORMULA_RECOGNITION_BATCH_SIZE: Optional[int] = None
-CHART_RECOGNITION_BATCH_SIZE: Optional[int] = None
-SEAL_TEXT_RECOGNITION_BATCH_SIZE: Optional[int] = None
-SEAL_REC_SCORE_THRESH: Optional[float] = None
-
-# Chart batch (explicit, already above)
-# CHART_RECOGNITION_BATCH_SIZE present
+TEXT_REC_SCORE_THRESH = 0.6       # Increase confidence threshold slightly for higher precision
+TEXT_RECOGNITION_BATCH_SIZE = 16  # Adjust batch size for performance
+TEXTLINE_ORIENTATION_BATCH_SIZE = None
+FORMULA_RECOGNITION_BATCH_SIZE = None
+CHART_RECOGNITION_BATCH_SIZE = None
+SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
+SEAL_REC_SCORE_THRESH = None
 
 # Init kwargs builder (filters None so library defaults apply)
 def _build_init_kwargs() -> Dict[str, Any]:
@@ -244,29 +242,22 @@ def _build_init_kwargs() -> Dict[str, Any]:
     )
     return {k: v for k, v in params.items() if v is not None}
 
-# Build final init kwargs and overlay accuracy tuning explicitly
+# Build final init kwargs
 _init_kwargs = _build_init_kwargs()
 
-pipeline = PPStructureV3(
-    **_init_kwargs,
-    # Accuracy-oriented detection tuning for medical lab reports
-    text_det_limit_side_len=1920,
-    text_det_limit_type="max",
-    text_det_thresh=0.20,
-    text_det_box_thresh=0.30,
-    text_det_unclip_ratio=2.5
-)
+# Initialize pipeline with all tuning applied via _init_kwargs (no overrides below)
+pipeline = PPStructureV3(**_init_kwargs)
 
 # Gate to enforce one-at-a-time inference
 predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
 
 def predict_collect_one(path: Path,
-                        use_ocr_results_with_table_cells: Optional[bool],
-                        use_e2e_wired_table_rec_model: Optional[bool],
-                        use_e2e_wireless_table_rec_model: Optional[bool],
-                        use_wired_table_cells_trans_to_html: Optional[bool],
-                        use_wireless_table_cells_trans_to_html: Optional[bool],
-                        use_table_orientation_classify: Optional[bool]) -> Dict[str, Any]:
+                        use_ocr_results_with_table_cells,
+                        use_e2e_wired_table_rec_model,
+                        use_e2e_wireless_table_rec_model,
+                        use_wired_table_cells_trans_to_html,
+                        use_wireless_table_cells_trans_to_html,
+                        use_table_orientation_classify) -> Dict[str, Any]:
     kwargs = {}
     if use_ocr_results_with_table_cells is not None:
         kwargs["use_ocr_results_with_table_cells"] = use_ocr_results_with_table_cells
@@ -315,12 +306,12 @@ async def parse(
     files: List[UploadFile] = File(...),
     output_format: Literal["json", "markdown", "both"] = Query("both"),
     # Optional predict-time table flags
-    use_ocr_results_with_table_cells: Optional[bool] = Query(None),
-    use_e2e_wired_table_rec_model: Optional[bool] = Query(None),
-    use_e2e_wireless_table_rec_model: Optional[bool] = Query(None),
-    use_wired_table_cells_trans_to_html: Optional[bool] = Query(None),
-    use_wireless_table_cells_trans_to_html: Optional[bool] = Query(None),
-    use_table_orientation_classify: Optional[bool] = Query(None),
+    use_ocr_results_with_table_cells = Query(None),
+    use_e2e_wired_table_rec_model = Query(None),
+    use_e2e_wireless_table_rec_model = Query(None),
+    use_wired_table_cells_trans_to_html = Query(None),
+    use_wireless_table_cells_trans_to_html = Query(None),
+    use_table_orientation_classify = Query(None),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
@@ -355,7 +346,6 @@ async def parse(
     if output_format == "json":
         return JSONResponse({"files": outputs})
     elif output_format == "markdown":
-        # Concatenate per-file per-page markdowns into a single markdown string
         combined_md = ""
         for f in outputs:
             combined_md += f"# {f['filename']}\n\n"
