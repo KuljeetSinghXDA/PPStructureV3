@@ -35,7 +35,7 @@ class ParseOptions(BaseModel):
     device: str = "cpu"
     enable_mkldnn: Optional[bool] = None
     mkldnn_cache_capacity: Optional[int] = None
-    cpu_threads: Optional[int] = None
+    cpu_threads: Optional[int] = 4
 
     # Language
     lang: Optional[str] = "en"
