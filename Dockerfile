@@ -1,6 +1,6 @@
 FROM --platform=linux/arm64/v8 python:3.13-slim
 
-# Install system dependencies for PDF handling (poppler), OpenCV, and image libs
+# Install system dependencies for PDF handling (poppler), OpenCV, image libs, and build tools
 RUN apt-get update && apt-get install -y \
     poppler-utils \
     libgl1 \
@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     libxrender-dev \
     libgomp1 \
     wget \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip and install pinned PaddlePaddle (CPU, ARM64 via custom index)
@@ -19,7 +20,7 @@ RUN pip install --no-cache-dir paddlepaddle -i https://www.paddlepaddle.org.cn/p
 # Install upgraded PaddleOCR with doc-parser extras for PP-StructureV3
 RUN pip install --no-cache-dir "paddleocr[doc-parser]==3.3.0"
 
-# Install ONNX dependencies for export and inference
+# Install ONNX dependencies for export and inference (wheels available for py3.12 aarch64)
 RUN pip install --no-cache-dir paddle2onnx onnxruntime paddlex
 
 # Install API dependencies
@@ -29,6 +30,7 @@ RUN pip install --no-cache-dir fastapi uvicorn[standard] python-multipart beauti
 RUN mkdir -p /models && \
     cat > /export_models.py << 'EOF'
 import os
+import glob
 from paddleocr import PPStructureV3
 
 # Download dummy image to trigger model downloads
@@ -54,23 +56,35 @@ pipeline = PPStructureV3(
 pipeline.predict('/tmp/dummy.jpg')
 os.unlink('/tmp/dummy.jpg')
 
-# Export to ONNX: Key sub-models (adjust paths if version changes)
+# Dynamically find and export to ONNX: Key sub-models
 home = os.path.expanduser('~')
-# Detection model
-det_dir = f"{home}/.paddleocr/whl/det_en/en_PP-OCRv5_mobile_det_infer"
-if os.path.exists(det_dir):
-    os.system(f'paddle2onnx --model_dir {det_dir} --model_filename inference.pdmodel --params_filename inference.pdiparams --save_dir /models/det --opset_version 17')
-# Recognition model
-rec_dir = f"{home}/.paddleocr/whl/rec_en/en_PP-OCRv5_mobile_rec_infer"
-if os.path.exists(rec_dir):
-    os.system(f'paddle2onnx --model_dir {rec_dir} --model_filename inference.pdmodel --params_filename inference.pdiparams --save_dir /models/rec --opset_version 17')
-# Layout model (from PaddleX)
-layout_dir = f"{home}/.paddlex/official_models/layout/PP-DocLayout-L_infer"
-if os.path.exists(layout_dir):
-    os.system(f'paddle2onnx --model_dir {layout_dir} --model_filename model.pdmodel --params_filename model.pdiparams --save_dir /models/layout --opset_version 17')
-# Note: Table/formula defaults not exported; add similarly if needed
+exported = []
 
-print("ONNX export completed for main models.")
+# Detection model (en_PP-OCRv5_mobile_det_infer)
+det_dirs = glob.glob(f"{home}/.paddleocr/whl/det_en/*_det_infer")
+if det_dirs:
+    det_dir = det_dirs[0]
+    os.system(f'paddle2onnx --model_dir {det_dir} --model_filename inference.pdmodel --params_filename inference.pdiparams --save_dir /models/det --opset_version 17')
+    exported.append('det')
+
+# Recognition model (en_PP-OCRv5_mobile_rec_infer)
+rec_dirs = glob.glob(f"{home}/.paddleocr/whl/rec_en/*_rec_infer")
+if rec_dirs:
+    rec_dir = rec_dirs[0]
+    os.system(f'paddle2onnx --model_dir {rec_dir} --model_filename inference.pdmodel --params_filename inference.pdiparams --save_dir /models/rec --opset_version 17')
+    exported.append('rec')
+
+# Layout model (PP-DocLayout-L_infer)
+layout_dirs = glob.glob(f"{home}/.paddlex/official_models/layout/*_infer")
+if layout_dirs:
+    layout_dir = layout_dirs[0]
+    # Adjust filename for PaddleX models
+    os.system(f'paddle2onnx --model_dir {layout_dir} --model_filename model.pdmodel --params_filename model.pdiparams --save_dir /models/layout --opset_version 17')
+    exported.append('layout')
+
+# Note: Table/formula defaults not exported; add glob if needed
+
+print(f"ONNX export completed for: {', '.join(exported)}")
 EOF
 
 # Run export on build (downloads ~500MB models and converts)
@@ -90,15 +104,16 @@ app = FastAPI(title="PP-StructureV3 API", version="3.3.0")
 
 # Tuned pipeline with ONNX loading for acceleration (falls back if dirs missing)
 pipeline = PPStructureV3(
-    # Specified models with ONNX dirs
+    # Specified models with ONNX dirs (auto-uses .onnx if present)
     layout_detection_model_name='PP-DocLayout-L',
-    layout_model_dir='/models/layout',
+    layout_model_dir='/models/layout' if os.path.exists('/models/layout') else None,
     text_detection_model_name='PP-OCRv5_mobile_det',
-    det_model_dir='/models/det',
+    det_model_dir='/models/det' if os.path.exists('/models/det') else None,
     text_recognition_model_name='en_PP-OCRv5_mobile_rec',
-    rec_model_dir='/models/rec',
-    # Backend (use ONNX if available)
-    enable_mkldnn=False,  # Disable for ONNX; set True for native CPU opt
+    rec_model_dir='/models/rec' if os.path.exists('/models/rec') else None,
+    # CPU optimizations (MKLDNN for native; ONNX auto-detected)
+    enable_mkldnn=True,
+    cpu_threads=4,  # Utilize all Ampere cores
     # Tuning for small fonts/dense tables
     text_det_limit_side_len=1280,
     text_det_limit_type='min',
@@ -146,7 +161,7 @@ async def parse_documents(files: List[UploadFile] = File(...)):
             tmp_file.write(content)
             tmp_path = tmp_file.name
         try:
-            # Run PP-StructureV3 (with ONNX if loaded)
+            # Run PP-StructureV3 (with ONNX/MKLDNN acceleration)
             page_results = pipeline.predict(tmp_path)
             results.append({
                 "filename": file.filename,
