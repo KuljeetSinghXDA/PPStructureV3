@@ -21,7 +21,7 @@ RUN python -m pip install --upgrade pip && \
     python -m pip install --pre paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
     python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
 
-# FastAPI app: PP-StructureV3 native outputs, chart disabled, accuracy tuning applied
+# Embed FastAPI app using PP-StructureV3 native outputs and accuracy tuning
 RUN cat > /app.py << 'EOF'
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -34,23 +34,24 @@ import json
 
 from paddleocr import PPStructureV3
 
-app = FastAPI(title="PP-StructureV3 API (ARM64, native, charts off)", version="3.3.0")
+app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.3.0")
 
-# Initialize PP-StructureV3 with requested models, chart disabled, and accuracy tuning
+# Initialize PP-StructureV3:
+# - Requested models
+# - No HPI (ARM64 HPI plugin not available)
+# - Accuracy-oriented tuning for dense medical reports
 pipeline = PPStructureV3(
     layout_detection_model_name="PP-DocLayout-L",
     text_detection_model_name="PP-OCRv5_mobile_det",
     text_recognition_model_name="en_PP-OCRv5_mobile_rec",
-    # Disable chart recognition to avoid PP-Chart2Table path in 3.3.0
-    use_chart_recognition=False,
-    # Keep other subpipelines at defaults (tables/formulas/region on)
     cpu_threads=4,                   # Ampere A1 4 OCPU
-    # Accuracy-oriented tuning for small fonts / dense tables
+    # Accuracy tuning for small fonts / dense tables
     text_det_limit_side_len=1920,
     text_det_limit_type="max",
     text_det_thresh=0.20,
     text_det_box_thresh=0.30,
     text_det_unclip_ratio=2.5
+    # Other subpipelines left at defaults
 )
 
 def predict_collect(path: Path) -> Dict[str, Any]:
@@ -63,8 +64,8 @@ def predict_collect(path: Path) -> Dict[str, Any]:
     pages = []
     with tempfile.TemporaryDirectory() as out_dir:
         out_dir = Path(out_dir)
-        json_files, md_files = [], []
         # Save native per-page artifacts then read back
+        json_files, md_files = [], []
         for res in results:
             res.save_to_json(save_path=str(out_dir))
             res.save_to_markdown(save_path=str(out_dir))
