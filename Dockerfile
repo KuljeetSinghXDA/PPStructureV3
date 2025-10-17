@@ -75,9 +75,9 @@ CPU_THREADS = 4                 # Ampere A1 4 OCPU single-process
 PADDLEX_CONFIG = None
 
 # Subpipeline toggles - TUNED FOR LAB REPORTS
-USE_DOC_ORIENTATION_CLASSIFY = False      # Enable to handle rotated scans
+USE_DOC_ORIENTATION_CLASSIFY = True      # Enable to handle rotated scans
 USE_DOC_UNWARPING = False                # Keep False on ARM64 for stability
-USE_TEXTLINE_ORIENTATION = False          # Enable for mixed orientation text
+USE_TEXTLINE_ORIENTATION = True          # Enable for mixed orientation text
 USE_TABLE_RECOGNITION = True             # CRITICAL: Enable for lab report tables
 USE_FORMULA_RECOGNITION = None           # Not typically needed for lab reports
 USE_CHART_RECOGNITION = None             # Not typically needed for lab reports
@@ -261,6 +261,7 @@ def predict_collect_one(path: Path,
                         use_table_orientation_classify) -> Dict[str, Any]:
     kwargs = {}
     # Default table-specific settings for lab reports - optimized for accuracy
+    # IMPORTANT: use_table_orientation_classify MUST be False to avoid PaddleOCR 3.2.0 bug
     if use_ocr_results_with_table_cells is not None:
         kwargs["use_ocr_results_with_table_cells"] = use_ocr_results_with_table_cells
     else:
@@ -275,10 +276,12 @@ def predict_collect_one(path: Path,
     if use_wireless_table_cells_trans_to_html is not None:
         kwargs["use_wireless_table_cells_trans_to_html"] = use_wireless_table_cells_trans_to_html
         
+    # CRITICAL FIX: Disable table_orientation_classify to avoid UnboundLocalError bug in PaddleOCR 3.2.0
+    # The bug is in table_recognition/pipeline_v2.py line 1310 where table_angle is accessed before init
     if use_table_orientation_classify is not None:
         kwargs["use_table_orientation_classify"] = use_table_orientation_classify
     else:
-        kwargs["use_table_orientation_classify"] = True  # Enable table orientation for scanned docs
+        kwargs["use_table_orientation_classify"] = False  # MUST be False to avoid library bug
 
     outputs = pipeline.predict(str(path), **kwargs)
     pages = []
