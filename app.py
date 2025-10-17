@@ -215,13 +215,19 @@ def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
     if invalid:
         raise ValueError(f"Invalid PPStructureV3 arguments: {invalid}. Remove or rename to documented parameters.")
 
+    # Ensure no chart model names/dirs are present if charts are disabled
+    if filtered.get("use_chart_recognition") is False:
+        filtered.pop("chart_recognition_model_name", None)
+        filtered.pop("chart_recognition_model_dir", None)
+        filtered.pop("chart_recognition_batch_size", None)
+
     return PPStructureV3(**filtered)
 
 # Instantiate configuration and pipeline
 CONFIG = PPStructureV3Config()
 PIPELINE = build_pipeline(CONFIG)
 
-app = FastAPI(title="PP-StructureV3 Parser", version="1.4.0")
+app = FastAPI(title="PP-StructureV3 Parser", version="1.4.1")
 
 def _save_and_collect_outputs(res_list, work_dir: str) -> List[Dict[str, Any]]:
     """
@@ -294,7 +300,7 @@ async def parse(files: List[UploadFile] = File(...)):
                 content = await uf.read()
                 out.write(content)
 
-            # Predict; keep chart parsing off via the supported flag (stable behavior)
+            # Predict; keep chart parsing off via the supported flag
             preds = PIPELINE.predict(tmp_path, use_chart_recognition=False)
 
             # Save native outputs and collect into response
