@@ -112,34 +112,34 @@ SEAL_TEXT_DETECTION_MODEL_DIR = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
 CHART_RECOGNITION_MODEL_DIR = None
 
-# Layout thresholds/controls - TUNED FOR DENSE LAYOUTS
-LAYOUT_THRESHOLD = 0.4          # Lower threshold to detect more layout regions
-LAYOUT_NMS = 0.5                # Standard NMS for proper overlap handling
-LAYOUT_UNCLIP_RATIO = 1.3       # Slightly expand layout boxes for better coverage
-LAYOUT_MERGE_BBOXES_MODE = None # Use default merging behavior
+# Layout thresholds/controls - OPTIMIZED FOR DENSE MEDICAL LAYOUTS
+LAYOUT_THRESHOLD = 0.4                # Lower threshold for better layout detection in dense docs
+LAYOUT_NMS = 0.5                      # Moderate NMS for layout elements
+LAYOUT_UNCLIP_RATIO = 1.8             # Expand layout boxes for better text capture
+LAYOUT_MERGE_BBOXES_MODE = None
 
 # Text detection tuning - OPTIMIZED FOR SMALL FONTS
-TEXT_DET_LIMIT_SIDE_LEN = 1920  # Increase from 960 to 1920 for high-res small text detection
-TEXT_DET_LIMIT_TYPE = "max"     # Ensure longest side doesn't exceed limit
-TEXT_DET_THRESH = 0.2           # Lower from 0.3 to 0.2 for better small/faint text detection
-TEXT_DET_BOX_THRESH = 0.5       # Lower from 0.6 to 0.5 for more lenient box acceptance
-TEXT_DET_UNCLIP_RATIO = 1.5     # Reduce from 2.0 to 1.5 for tighter boxes in dense layouts
+TEXT_DET_LIMIT_SIDE_LEN = 1536        # Higher resolution for small text
+TEXT_DET_LIMIT_TYPE = "max"           # Resize based on max dimension
+TEXT_DET_THRESH = 0.3                 # Lower threshold for small font detection
+TEXT_DET_BOX_THRESH = 0.25            # Lower box threshold for dense text
+TEXT_DET_UNCLIP_RATIO = 1.8           # Expand text boxes for small fonts
 
-# Seal detection tuning - Not used but set to None
+# Seal detection tuning (disabled)
 SEAL_DET_LIMIT_SIDE_LEN = None
 SEAL_DET_LIMIT_TYPE = None
 SEAL_DET_THRESH = None
 SEAL_DET_BOX_THRESH = None
 SEAL_DET_UNCLIP_RATIO = None
 
-# Recognition thresholds/batches - TUNED FOR ACCURACY
-TEXT_REC_SCORE_THRESH = 0.5           # Set threshold to filter low-confidence results
-TEXT_RECOGNITION_BATCH_SIZE = 8       # Batch size 8 for better accuracy/speed balance
-TEXTLINE_ORIENTATION_BATCH_SIZE = 8   # Match text recognition batch size
-FORMULA_RECOGNITION_BATCH_SIZE = None # Not used
-CHART_RECOGNITION_BATCH_SIZE = None   # Not used
-SEAL_TEXT_RECOGNITION_BATCH_SIZE = None # Not used
-SEAL_REC_SCORE_THRESH = None          # Not used
+# Recognition thresholds/batches - OPTIMIZED FOR ACCURACY
+TEXT_REC_SCORE_THRESH = 0.7           # Higher confidence threshold for medical accuracy
+TEXT_RECOGNITION_BATCH_SIZE = 8       # Batch processing for efficiency
+TEXTLINE_ORIENTATION_BATCH_SIZE = None
+FORMULA_RECOGNITION_BATCH_SIZE = None
+CHART_RECOGNITION_BATCH_SIZE = None
+SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
+SEAL_REC_SCORE_THRESH = None
 
 # Predict-time table recognition defaults - TUNED FOR LAB REPORTS
 # CRITICAL: use_table_orientation_classify MUST be False to avoid PaddleOCR 3.2.0 UnboundLocalError bug
