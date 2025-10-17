@@ -2,7 +2,7 @@
 # Build:  docker buildx build --platform linux/arm64 -t ppstructv3:cpu .
 # Run:    docker run --rm -p 8080:8080 -e OMP_NUM_THREADS=1 ppstructv3:cpu
 
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -27,7 +27,7 @@ RUN python -m pip install "paddlepaddle" \
 #    Using the 3.3 release branch per your request.
 #    Extras: doc-parser pulls parser dependencies used by PP-StructureV3.
 RUN python -m pip install \
-      "paddleocr[doc-parser]" \
+      "paddleocr[all]==3.3.0" \
       fastapi uvicorn[standard] python-multipart
 
 # App
