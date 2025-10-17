@@ -23,7 +23,7 @@ RUN python -m pip install --upgrade pip && \
     python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
 
 # Embedded FastAPI app:
-# - One long-lived PP-StructureV3 with requested models and accuracy tuning
+# - One long-lived PP-StructureV3 with medical lab report optimized parameters
 # - All supported init args exposed (None => library defaults)
 # - All documented table predict-time flags exposed (None => default)
 # - Native JSON/Markdown outputs; HPI not enabled for ARM64 stability
@@ -54,17 +54,17 @@ def _file_exceeds_limit(tmp_path: Path) -> bool:
     except Exception:
         return False
 
-app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
+app = FastAPI(title="PP-StructureV3 API (ARM64, Medical Lab Optimized)", version="3.2.0")
 
 # ==============================
-# Supported PP-StructureV3 params (Tuned for Medical Lab Reports)
+# OPTIMIZED PARAMETERS FOR MEDICAL LAB REPORTS
 # ==============================
 # Backend/config toggles
-DEVICE = 'cpu'          # Explicitly set device
-ENABLE_MKLDNN = False   # Disable MKLDNN on ARM64 for stability/correctness
-ENABLE_HPI = None       # Keep None/False on ARM64 to avoid PaddleX HPI plugin
+DEVICE = None
+ENABLE_MKLDNN = None
+ENABLE_HPI = None      # Keep None/False on ARM64 to avoid PaddleX HPI plugin
 USE_TENSORRT = None
-PRECISION = 'fp32'      # Use full precision for maximum accuracy
+PRECISION = None
 MKLDNN_CACHE_CAPACITY = None
 
 # Threads
@@ -73,18 +73,18 @@ CPU_THREADS = 4         # Ampere A1 4 OCPU single-process
 # Optional PaddleX config passthrough (kept None)
 PADDLEX_CONFIG = None
 
-# Subpipeline toggles
-USE_DOC_ORIENTATION_CLASSIFY = True # Enable for robustness against rotated scans
+# Subpipeline toggles - Enable table recognition for medical lab reports
+USE_DOC_ORIENTATION_CLASSIFY = None
 USE_DOC_UNWARPING = None
-USE_TEXTLINE_ORIENTATION = True   # Enable for robustness against minor text skew
-USE_TABLE_RECOGNITION = True      # CRITICAL: Enable to process tables in lab reports
+USE_TEXTLINE_ORIENTATION = None
+USE_TABLE_RECOGNITION = True       # CRITICAL: Enable for lab tables
 USE_FORMULA_RECOGNITION = None
 USE_CHART_RECOGNITION = None
 USE_SEAL_RECOGNITION = None
 USE_REGION_DETECTION = None
 
-# Model names (requested three set; others None)
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
+# Model names - optimized for accuracy on medical documents
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"  # Larger model for better layout detection
 REGION_DETECTION_MODEL_NAME = None
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
@@ -121,29 +121,29 @@ SEAL_TEXT_DETECTION_MODEL_DIR = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
 CHART_RECOGNITION_MODEL_DIR = None
 
-# Layout thresholds/controls
-LAYOUT_THRESHOLD = 0.4            # Lower to detect more layout elements in dense reports
-LAYOUT_NMS = 0.4                  # Lower to prevent merging distinct but close boxes
-LAYOUT_UNCLIP_RATIO = None
+# Layout thresholds/controls - optimized for dense layouts
+LAYOUT_THRESHOLD = 0.3               # Lower threshold to catch more elements
+LAYOUT_NMS = True                    # Enable NMS for overlapping regions
+LAYOUT_UNCLIP_RATIO = 1.2           # Slightly expand layout regions
 LAYOUT_MERGE_BBOXES_MODE = None
 
-# Text detection tuning
-TEXT_DET_LIMIT_SIDE_LEN = 2560    # CRITICAL: Increase resolution for small fonts
-TEXT_DET_LIMIT_TYPE = 'max'       # Ensure the longest side fits within the limit
-TEXT_DET_THRESH = None
-TEXT_DET_BOX_THRESH = 0.5         # Lower to detect text boxes with lower confidence (faint/small text)
-TEXT_DET_UNCLIP_RATIO = 1.2       # Reduce box expansion to avoid merging adjacent tiny text
+# Text detection tuning - CRITICAL FOR SMALL DENSE TEXT
+TEXT_DET_LIMIT_SIDE_LEN = 1280       # Higher resolution for small text
+TEXT_DET_LIMIT_TYPE = "max"          # Use max to preserve detail
+TEXT_DET_THRESH = 0.2               # Lower pixel threshold for faint text
+TEXT_DET_BOX_THRESH = 0.4           # Lower box threshold for better recall
+TEXT_DET_UNCLIP_RATIO = 2.0         # Larger unclip for small text expansion
 
-# Seal detection tuning
+# Seal detection tuning (if needed for stamps on lab reports)
 SEAL_DET_LIMIT_SIDE_LEN = None
 SEAL_DET_LIMIT_TYPE = None
 SEAL_DET_THRESH = None
 SEAL_DET_BOX_THRESH = None
 SEAL_DET_UNCLIP_RATIO = None
 
-# Recognition thresholds/batches
-TEXT_REC_SCORE_THRESH = 0.6       # Increase confidence threshold slightly for higher precision
-TEXT_RECOGNITION_BATCH_SIZE = 16  # Adjust batch size for performance
+# Recognition thresholds/batches - optimized for accuracy
+TEXT_REC_SCORE_THRESH = 0.3          # Lower threshold to keep more text
+TEXT_RECOGNITION_BATCH_SIZE = 8      # Smaller batch for stability
 TEXTLINE_ORIENTATION_BATCH_SIZE = None
 FORMULA_RECOGNITION_BATCH_SIZE = None
 CHART_RECOGNITION_BATCH_SIZE = None
@@ -245,7 +245,7 @@ def _build_init_kwargs() -> Dict[str, Any]:
 # Build final init kwargs
 _init_kwargs = _build_init_kwargs()
 
-# Initialize pipeline with all tuning applied via _init_kwargs (no overrides below)
+# Initialize pipeline with medical lab optimized parameters
 pipeline = PPStructureV3(**_init_kwargs)
 
 # Gate to enforce one-at-a-time inference
@@ -259,8 +259,12 @@ def predict_collect_one(path: Path,
                         use_wireless_table_cells_trans_to_html,
                         use_table_orientation_classify) -> Dict[str, Any]:
     kwargs = {}
-    if use_ocr_results_with_table_cells is not None:
+    # Medical lab reports benefit from cell-level OCR for table accuracy
+    if use_ocr_results_with_table_cells is None:
+        kwargs["use_ocr_results_with_table_cells"] = True  # Default to True for medical tables
+    else:
         kwargs["use_ocr_results_with_table_cells"] = use_ocr_results_with_table_cells
+        
     if use_e2e_wired_table_rec_model is not None:
         kwargs["use_e2e_wired_table_rec_model"] = use_e2e_wired_table_rec_model
     if use_e2e_wireless_table_rec_model is not None:
@@ -299,19 +303,19 @@ def predict_collect_one(path: Path,
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "optimized_for": "medical_lab_reports"}
 
 @app.post("/parse")
 async def parse(
     files: List[UploadFile] = File(...),
     output_format: Literal["json", "markdown", "both"] = Query("both"),
-    # Optional predict-time table flags
-    use_ocr_results_with_table_cells = Query(None),
+    # Optional predict-time table flags with medical-optimized defaults
+    use_ocr_results_with_table_cells = Query(True),  # Default to True for medical accuracy
     use_e2e_wired_table_rec_model = Query(None),
     use_e2e_wireless_table_rec_model = Query(None),
     use_wired_table_cells_trans_to_html = Query(None),
     use_wireless_table_cells_trans_to_html = Query(None),
-    use_table_orientation_classify = Query(None),
+    use_table_orientation_classify = Query(True),  # Default to True for rotated lab reports
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
