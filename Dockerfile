@@ -45,21 +45,11 @@ ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
 
-def _ext_ok(filename: str) -> bool:
-    return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
-
-def _file_exceeds_limit(tmp_path: Path) -> bool:
-    try:
-        return tmp_path.stat().st_size > MAX_FILE_SIZE_MB * 1024 * 1024
-    except Exception:
-        return False
-
-app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
-
 # ==============================
 # Supported PP-StructureV3 params (None => defaults)
 # TUNED FOR MEDICAL LAB REPORTS: tables, small fonts, dense layouts
 # ==============================
+
 # Backend/config toggles
 DEVICE = "cpu"                  # Explicit CPU device
 ENABLE_MKLDNN = True            # Enable CPU optimization for better performance
@@ -75,14 +65,14 @@ CPU_THREADS = 4                 # Ampere A1 4 OCPU single-process
 PADDLEX_CONFIG = None
 
 # Subpipeline toggles - TUNED FOR LAB REPORTS
-USE_DOC_ORIENTATION_CLASSIFY = True      # Enable to handle rotated scans
+USE_DOC_ORIENTATION_CLASSIFY = False      # Enable to handle rotated scans
 USE_DOC_UNWARPING = False                # Keep False on ARM64 for stability
-USE_TEXTLINE_ORIENTATION = True          # Enable for mixed orientation text
+USE_TEXTLINE_ORIENTATION = False          # Enable for mixed orientation text
 USE_TABLE_RECOGNITION = True             # CRITICAL: Enable for lab report tables
-USE_FORMULA_RECOGNITION = None           # Not typically needed for lab reports
-USE_CHART_RECOGNITION = None             # Not typically needed for lab reports
-USE_SEAL_RECOGNITION = None              # Not typically needed for lab reports
-USE_REGION_DETECTION = None              # Let layout detection handle regions
+USE_FORMULA_RECOGNITION = False           # Not typically needed for lab reports
+USE_CHART_RECOGNITION = False             # Not typically needed for lab reports
+USE_SEAL_RECOGNITION = False              # Not typically needed for lab reports
+USE_REGION_DETECTION = True              # Let layout detection handle regions
 
 # Model names (requested three set; others None) - DO NOT CHANGE
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
@@ -150,6 +140,30 @@ FORMULA_RECOGNITION_BATCH_SIZE = None # Not used
 CHART_RECOGNITION_BATCH_SIZE = None   # Not used
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None # Not used
 SEAL_REC_SCORE_THRESH = None          # Not used
+
+# Predict-time table recognition defaults - TUNED FOR LAB REPORTS
+# CRITICAL: use_table_orientation_classify MUST be False to avoid PaddleOCR 3.2.0 UnboundLocalError bug
+DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = True   # Use OCR results for better cell text accuracy
+DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL = None      # Use default (None lets library decide)
+DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL = None   # Use default (None lets library decide)
+DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML = None    # Use default (None lets library decide)
+DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML = None # Use default (None lets library decide)
+DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = False    # MUST be False to avoid library bug at line 1310
+
+# ==============================
+# END OF CONFIGURATION
+# ==============================
+
+def _ext_ok(filename: str) -> bool:
+    return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
+
+def _file_exceeds_limit(tmp_path: Path) -> bool:
+    try:
+        return tmp_path.stat().st_size > MAX_FILE_SIZE_MB * 1024 * 1024
+    except Exception:
+        return False
+
+app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
 
 # Init kwargs builder (filters None so library defaults apply)
 def _build_init_kwargs() -> Dict[str, Any]:
@@ -260,28 +274,46 @@ def predict_collect_one(path: Path,
                         use_wireless_table_cells_trans_to_html,
                         use_table_orientation_classify) -> Dict[str, Any]:
     kwargs = {}
-    # Default table-specific settings for lab reports - optimized for accuracy
-    # IMPORTANT: use_table_orientation_classify MUST be False to avoid PaddleOCR 3.2.0 bug
-    if use_ocr_results_with_table_cells is not None:
-        kwargs["use_ocr_results_with_table_cells"] = use_ocr_results_with_table_cells
-    else:
-        kwargs["use_ocr_results_with_table_cells"] = True  # Use OCR results for better cell text
-        
-    if use_e2e_wired_table_rec_model is not None:
-        kwargs["use_e2e_wired_table_rec_model"] = use_e2e_wired_table_rec_model
-    if use_e2e_wireless_table_rec_model is not None:
-        kwargs["use_e2e_wireless_table_rec_model"] = use_e2e_wireless_table_rec_model
-    if use_wired_table_cells_trans_to_html is not None:
-        kwargs["use_wired_table_cells_trans_to_html"] = use_wired_table_cells_trans_to_html
-    if use_wireless_table_cells_trans_to_html is not None:
-        kwargs["use_wireless_table_cells_trans_to_html"] = use_wireless_table_cells_trans_to_html
-        
-    # CRITICAL FIX: Disable table_orientation_classify to avoid UnboundLocalError bug in PaddleOCR 3.2.0
-    # The bug is in table_recognition/pipeline_v2.py line 1310 where table_angle is accessed before init
-    if use_table_orientation_classify is not None:
-        kwargs["use_table_orientation_classify"] = use_table_orientation_classify
-    else:
-        kwargs["use_table_orientation_classify"] = False  # MUST be False to avoid library bug
+    
+    # Apply user override or use default from top configuration section
+    kwargs["use_ocr_results_with_table_cells"] = (
+        use_ocr_results_with_table_cells 
+        if use_ocr_results_with_table_cells is not None 
+        else DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS
+    )
+    
+    kwargs["use_e2e_wired_table_rec_model"] = (
+        use_e2e_wired_table_rec_model 
+        if use_e2e_wired_table_rec_model is not None 
+        else DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL
+    )
+    
+    kwargs["use_e2e_wireless_table_rec_model"] = (
+        use_e2e_wireless_table_rec_model 
+        if use_e2e_wireless_table_rec_model is not None 
+        else DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL
+    )
+    
+    kwargs["use_wired_table_cells_trans_to_html"] = (
+        use_wired_table_cells_trans_to_html 
+        if use_wired_table_cells_trans_to_html is not None 
+        else DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML
+    )
+    
+    kwargs["use_wireless_table_cells_trans_to_html"] = (
+        use_wireless_table_cells_trans_to_html 
+        if use_wireless_table_cells_trans_to_html is not None 
+        else DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML
+    )
+    
+    kwargs["use_table_orientation_classify"] = (
+        use_table_orientation_classify 
+        if use_table_orientation_classify is not None 
+        else DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY
+    )
+    
+    # Filter out None values to let library use its internal defaults
+    kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
     outputs = pipeline.predict(str(path), **kwargs)
     pages = []
@@ -316,7 +348,6 @@ def health():
 async def parse(
     files: List[UploadFile] = File(...),
     output_format: Literal["json", "markdown", "both"] = Query("both"),
-    # Optional predict-time table flags (with sensible defaults for lab reports)
     use_ocr_results_with_table_cells = Query(None),
     use_e2e_wired_table_rec_model = Query(None),
     use_e2e_wireless_table_rec_model = Query(None),
