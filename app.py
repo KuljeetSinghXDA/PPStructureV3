@@ -1,225 +1,316 @@
-import io
-import os
-import shutil
-import tempfile
-import json
-from typing import List, Optional, Dict, Any
-
-from fastapi import FastAPI, UploadFile, File, Query, Body
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass, asdict
+import tempfile
+import shutil
+import os
+import json
+from paddleocr import PPStructureV3
 
-# Native PP-StructureV3 pipeline (PaddleOCR 3.x)
-# Docs: predict(), save_to_json(), save_to_markdown(), model-name params
-# https://www.paddleocr.ai/main/en/version3.x/pipeline_usage/PP-StructureV3.html
-from paddleocr import PPStructureV3  # type: ignore  # installed at runtime
+# ------------------------------------------------------------------------------------
+# Configuration: edit only this section to change models/behavior as required.
+# ------------------------------------------------------------------------------------
 
+@dataclass
+class PPStructureV3Config:
+    # Device and performance
+    device: str = "cpu"                      # "cpu" or "gpu:0"
+    enable_hpi: bool = False                 # High-performance inference (backend-dependent)
+    use_tensorrt: bool = False               # GPU-only; ignored on CPU
+    precision: str = "fp32"                  # "fp32" on CPU
+    enable_mkldnn: bool = True               # CPU acceleration
+    mkldnn_cache_capacity: int = 10
+    cpu_threads: int = 4
 
-app = FastAPI(
-    title="PP-StructureV3 (CPU, arm64) Service",
-    version="1.0.0",
-    description="FastAPI wrapper around PaddleOCR PP-StructureV3 for JSON + Markdown outputs."
-)
+    # Language and general OCR behavior
+    lang: str = "en"                         # English focus for medical lab reports
 
-class ParseOptions(BaseModel):
-    # Core toggles
-    return_json: bool = True
-    return_markdown: bool = True
+    # Core model choices per requirements
+    layout_detection_model_name: str = "PP-DocLayout-L"
+    text_detection_model_name: str = "PP-OCRv5_mobile_det"
+    text_recognition_model_name: str = "en_PP-OCRv5_mobile_rec"
 
-    # Save results to a persistent directory (mounted volume) if desired
-    save_dir: Optional[str] = Field(
-        default=None,
-        description="If set, save native JSON/Markdown files into this directory."
-    )
+    # Optional local model dirs (None pulls official weights)
+    layout_detection_model_dir: Optional[str] = None
+    text_detection_model_dir: Optional[str] = None
+    text_recognition_model_dir: Optional[str] = None
 
-    # Performance/device
-    device: str = Field(default="cpu", description="Device string, e.g. 'cpu'.")
-
-    # Medical lab reports are largely English with tables; we set English rec by default.
-    lang: str = Field(default="en", description="OCR language for recognition model selection.")
-
-    # Requested model overrides (defaults set to your spec)
-    layout_detection_model_name: Optional[str] = Field(default="PP-DocLayout-L")
-    text_detection_model_name: Optional[str] = Field(default="PP-OCRv5_mobile_det")
-    text_recognition_model_name: Optional[str] = Field(default="en_PP-OCRv5_mobile_rec")
-
-    # Keep other modules at their defaults; expose toggles so you can turn them on if needed
-    use_doc_orientation_classify: bool = False
-    use_doc_unwarping: bool = False
+    # Sub-pipeline toggles
+    use_doc_orientation_classify: bool = True      # helpful for scans
+    use_doc_unwarping: bool = True                 # helpful for camera/skew
     use_textline_orientation: bool = False
+    use_seal_recognition: bool = False
+    use_table_recognition: bool = True
+    use_formula_recognition: bool = True
+    use_chart_recognition: bool = False            # keep chart VLM off consistently
+    use_region_detection: bool = True
 
-    # Optional thresholds/tunables for tricky docs (left None = pipeline defaults)
-    layout_threshold: Optional[float] = None
-    text_det_limit_side_len: Optional[int] = None
+    # Detection params
+    text_det_limit_side_len: int = 960
+    text_det_limit_type: str = "max"
+    text_det_thresh: float = 0.3
+    text_det_box_thresh: float = 0.6
+    text_det_unclip_ratio: float = 2.0
 
+    # Layout params
+    layout_threshold: float = 0.5
+    layout_nms: bool = True
+    layout_unclip_ratio: float = 1.0
+    layout_merge_bboxes_mode: str = "large"
 
-# Cache pipelines by a small config key to avoid reloading weights for every request
-# This keeps "as per native implementation" while supporting runtime overrides safely.
-from functools import lru_cache
+    # Batching and thresholds
+    text_recognition_batch_size: int = 1
+    text_rec_score_thresh: float = 0.0
 
-def _pipeline_key(opts: ParseOptions) -> tuple:
-    return (
-        opts.device,
-        opts.lang,
-        opts.layout_detection_model_name or "",
-        opts.text_detection_model_name or "",
-        opts.text_recognition_model_name or "",
-        opts.use_doc_orientation_classify,
-        opts.use_doc_unwarping,
-        opts.use_textline_orientation,
-        opts.layout_threshold,
-        opts.text_det_limit_side_len,
+    # Optional specialized modules (keep None to use defaults or skip)
+    table_classification_model_name: Optional[str] = None
+    table_classification_model_dir: Optional[str] = None
+    wired_table_structure_recognition_model_name: Optional[str] = None
+    wired_table_structure_recognition_model_dir: Optional[str] = None
+    wireless_table_structure_recognition_model_name: Optional[str] = None
+    wireless_table_structure_recognition_model_dir: Optional[str] = None
+    wired_table_cells_detection_model_name: Optional[str] = None
+    wired_table_cells_detection_model_dir: Optional[str] = None
+    wireless_table_cells_detection_model_name: Optional[str] = None
+    wireless_table_cells_detection_model_dir: Optional[str] = None
+    table_orientation_classify_model_name: Optional[str] = None
+    table_orientation_classify_model_dir: Optional[str] = None
+
+    formula_recognition_model_name: Optional[str] = None
+    formula_recognition_model_dir: Optional[str] = None
+    formula_recognition_batch_size: int = 1
+
+    seal_text_detection_model_name: Optional[str] = None
+    seal_text_detection_model_dir: Optional[str] = None
+    seal_det_limit_side_len: int = 736
+    seal_det_limit_type: str = "min"
+    seal_det_thresh: float = 0.2
+    seal_det_box_thresh: float = 0.6
+    seal_det_unclip_ratio: float = 0.5
+    seal_text_recognition_model_name: Optional[str] = None
+    seal_text_recognition_model_dir: Optional[str] = None
+    seal_text_recognition_batch_size: int = 1
+    seal_rec_score_thresh: float = 0.0
+
+    chart_recognition_model_name: Optional[str] = None
+    chart_recognition_model_dir: Optional[str] = None
+    chart_recognition_batch_size: int = 1
+
+    # Markdown combination behavior
+    combine_markdown_pages: bool = True
+
+def build_pipeline(cfg: PPStructureV3Config) -> PPStructureV3:
+    raw_kwargs = dict(
+        device=cfg.device,
+        enable_hpi=cfg.enable_hpi,
+        use_tensorrt=cfg.use_tensorrt,
+        precision=cfg.precision,
+        enable_mkldnn=cfg.enable_mkldnn,
+        mkldnn_cache_capacity=cfg.mkldnn_cache_capacity,
+        cpu_threads=cfg.cpu_threads,
+        lang=cfg.lang,
+
+        # core models
+        layout_detection_model_name=cfg.layout_detection_model_name,
+        text_detection_model_name=cfg.text_detection_model_name,
+        text_recognition_model_name=cfg.text_recognition_model_name,
+
+        # optional local dirs
+        layout_detection_model_dir=cfg.layout_detection_model_dir,
+        text_detection_model_dir=cfg.text_detection_model_dir,
+        text_recognition_model_dir=cfg.text_recognition_model_dir,
+
+        # toggles
+        use_doc_orientation_classify=cfg.use_doc_orientation_classify,
+        use_doc_unwarping=cfg.use_doc_unwarping,
+        use_textline_orientation=cfg.use_textline_orientation,
+        use_seal_recognition=cfg.use_seal_recognition,
+        use_table_recognition=cfg.use_table_recognition,
+        use_formula_recognition=cfg.use_formula_recognition,
+        use_chart_recognition=cfg.use_chart_recognition,
+        use_region_detection=cfg.use_region_detection,
+
+        # det params
+        text_det_limit_side_len=cfg.text_det_limit_side_len,
+        text_det_limit_type=cfg.text_det_limit_type,
+        text_det_thresh=cfg.text_det_thresh,
+        text_det_box_thresh=cfg.text_det_box_thresh,
+        text_det_unclip_ratio=cfg.text_det_unclip_ratio,
+
+        # layout params
+        layout_threshold=cfg.layout_threshold,
+        layout_nms=cfg.layout_nms,
+        layout_unclip_ratio=cfg.layout_unclip_ratio,
+        layout_merge_bboxes_mode=cfg.layout_merge_bboxes_mode,
+
+        # batching
+        text_recognition_batch_size=cfg.text_recognition_batch_size,
+        text_rec_score_thresh=cfg.text_rec_score_thresh,
+
+        # optional module overrides
+        table_classification_model_name=cfg.table_classification_model_name,
+        table_classification_model_dir=cfg.table_classification_model_dir,
+        wired_table_structure_recognition_model_name=cfg.wired_table_structure_recognition_model_name,
+        wired_table_structure_recognition_model_dir=cfg.wired_table_structure_recognition_model_dir,
+        wireless_table_structure_recognition_model_name=cfg.wireless_table_structure_recognition_model_name,
+        wireless_table_structure_recognition_model_dir=cfg.wireless_table_structure_recognition_model_dir,
+        wired_table_cells_detection_model_name=cfg.wired_table_cells_detection_model_name,
+        wired_table_cells_detection_model_dir=cfg.wired_table_cells_detection_model_dir,
+        wireless_table_cells_detection_model_name=cfg.wireless_table_cells_detection_model_name,
+        wireless_table_cells_detection_model_dir=cfg.wireless_table_cells_detection_model_dir,
+        table_orientation_classify_model_name=cfg.table_orientation_classify_model_name,
+        table_orientation_classify_model_dir=cfg.table_orientation_classify_model_dir,
+
+        formula_recognition_model_name=cfg.formula_recognition_model_name,
+        formula_recognition_model_dir=cfg.formula_recognition_model_dir,
+        formula_recognition_batch_size=cfg.formula_recognition_batch_size,
+
+        seal_text_detection_model_name=cfg.seal_text_detection_model_name,
+        seal_text_detection_model_dir=cfg.seal_text_detection_model_dir,
+        seal_det_limit_side_len=cfg.seal_det_limit_side_len,
+        seal_det_limit_type=cfg.seal_det_limit_type,
+        seal_det_thresh=cfg.seal_det_thresh,
+        seal_det_box_thresh=cfg.seal_det_box_thresh,
+        seal_det_unclip_ratio=cfg.seal_det_unclip_ratio,
+        seal_text_recognition_model_name=cfg.seal_text_recognition_model_name,
+        seal_text_recognition_model_dir=cfg.seal_text_recognition_model_dir,
+        seal_text_recognition_batch_size=cfg.seal_text_recognition_batch_size,
+        seal_rec_score_thresh=cfg.seal_rec_score_thresh,
+
+        chart_recognition_model_name=cfg.chart_recognition_model_name,
+        chart_recognition_model_dir=cfg.chart_recognition_model_dir,
+        chart_recognition_batch_size=cfg.chart_recognition_batch_size,
     )
 
-@lru_cache(maxsize=4)
-def get_pipeline_cached(key: tuple) -> PPStructureV3:
-    # Unpack back into a PPStructureV3 instance
-    (
-        device,
-        lang,
-        layout_name,
-        det_name,
-        rec_name,
-        use_doc_ori,
-        use_unwarp,
-        use_textline_ori,
-        layout_thresh,
-        det_limit_len,
-    ) = key
+    allowed_keys = {
+        "device", "enable_hpi", "use_tensorrt", "precision", "enable_mkldnn",
+        "mkldnn_cache_capacity", "cpu_threads", "lang",
+        "layout_detection_model_name", "text_detection_model_name", "text_recognition_model_name",
+        "layout_detection_model_dir", "text_detection_model_dir", "text_recognition_model_dir",
+        "use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation",
+        "use_seal_recognition", "use_table_recognition", "use_formula_recognition",
+        "use_chart_recognition", "use_region_detection",
+        "text_det_limit_side_len", "text_det_limit_type", "text_det_thresh",
+        "text_det_box_thresh", "text_det_unclip_ratio",
+        "layout_threshold", "layout_nms", "layout_unclip_ratio", "layout_merge_bboxes_mode",
+        "text_recognition_batch_size", "text_rec_score_thresh",
+        "table_classification_model_name", "table_classification_model_dir",
+        "wired_table_structure_recognition_model_name", "wired_table_structure_recognition_model_dir",
+        "wireless_table_structure_recognition_model_name", "wireless_table_structure_recognition_model_dir",
+        "wired_table_cells_detection_model_name", "wired_table_cells_detection_model_dir",
+        "wireless_table_cells_detection_model_name", "wireless_table_cells_detection_model_dir",
+        "table_orientation_classify_model_name", "table_orientation_classify_model_dir",
+        "formula_recognition_model_name", "formula_recognition_model_dir", "formula_recognition_batch_size",
+        "seal_text_detection_model_name", "seal_text_detection_model_dir",
+        "seal_det_limit_side_len", "seal_det_limit_type", "seal_det_thresh",
+        "seal_det_box_thresh", "seal_det_unclip_ratio",
+        "seal_text_recognition_model_name", "seal_text_recognition_model_dir",
+        "seal_text_recognition_batch_size", "seal_rec_score_thresh",
+        "chart_recognition_model_name", "chart_recognition_model_dir", "chart_recognition_batch_size",
+    }
 
-    kwargs: Dict[str, Any] = dict(
-        device=device,
-        lang=lang,
-        use_doc_orientation_classify=use_doc_ori,
-        use_doc_unwarping=use_unwarp,
-        use_textline_orientation=use_textline_ori,
-        layout_detection_model_name=layout_name or None,
-        text_detection_model_name=det_name or None,
-        text_recognition_model_name=rec_name or None,
-    )
-    if layout_thresh is not None:
-        kwargs["layout_threshold"] = float(layout_thresh)
-    if det_limit_len is not None:
-        kwargs["text_det_limit_side_len"] = int(det_limit_len)
+    filtered = {k: v for k, v in raw_kwargs.items() if v is not None and k in allowed_keys}
+    invalid = sorted([k for k in raw_kwargs.keys() if k not in allowed_keys and raw_kwargs[k] is not None])
+    if invalid:
+        raise ValueError(f"Invalid PPStructureV3 arguments: {invalid}. Remove or rename to documented parameters.")
 
-    return PPStructureV3(**kwargs)
+    return PPStructureV3(**filtered)
 
-def get_pipeline(opts: ParseOptions) -> PPStructureV3:
-    return get_pipeline_cached(_pipeline_key(opts))
+# Instantiate configuration and pipeline
+CONFIG = PPStructureV3Config()
+PIPELINE = build_pipeline(CONFIG)
 
+app = FastAPI(title="PP-StructureV3 Parser", version="1.4.0")
 
-@app.get("/healthz")
-def healthz():
-    return {"status": "ok"}
+def _save_and_collect_outputs(res_list, work_dir: str) -> List[Dict[str, Any]]:
+    """
+    Save native JSON and Markdown via official result methods and load for response.
+    """
+    for res in res_list:
+        res.save_to_json(save_path=work_dir)
+        res.save_to_markdown(save_path=work_dir)
 
+    json_files = [os.path.join(work_dir, f) for f in os.listdir(work_dir) if f.lower().endswith(".json")]
+    md_files = [os.path.join(work_dir, f) for f in os.listdir(work_dir) if f.lower().endswith(".md")]
+    md_index = {os.path.splitext(os.path.basename(p))[0]: p for p in md_files}
+
+    pages = []
+    for jf in sorted(json_files):
+        key = os.path.splitext(os.path.basename(jf))[0]
+        with open(jf, "r", encoding="utf-8") as f:
+            j = json.load(f)
+        md_content = None
+        if key in md_index:
+            with open(md_index[key], "r", encoding="utf-8") as mf:
+                md_content = mf.read()
+        page_idx = None
+        try:
+            page_idx = j.get("res", {}).get("page_index", None)
+        except Exception:
+            page_idx = None
+
+        pages.append({"page_index": page_idx, "json": j, "markdown": md_content})
+    return pages
+
+def _combine_markdown_pages_from_res(pipeline: PPStructureV3, res_list) -> str:
+    """
+    Produce a single Markdown string using the documented API with robust fallback.
+    """
+    md_list = []
+    for res in res_list:
+        md_obj = getattr(res, "markdown", None)
+        if isinstance(md_obj, dict):
+            md_list.append(md_obj)
+
+    if not md_list:
+        return ""
+
+    try:
+        return pipeline.concatenate_markdown_pages(md_list)
+    except Exception:
+        try:
+            backend = getattr(pipeline, "paddlex_pipeline", None)
+            if backend and hasattr(backend, "concatenate_markdown_pages"):
+                return backend.concatenate_markdown_pages(md_list)
+        except Exception:
+            pass
+    return ""
 
 @app.post("/parse")
-async def parse(
-    files: List[UploadFile] = File(..., description="One or more images or PDFs."),
-    # Options can be provided as JSON body or query params
-    options: ParseOptions = Body(default=ParseOptions())
-):
-    # Prepare an overall response container
-    response_payload: Dict[str, Any] = {
-        "engine": "PP-StructureV3",
-        "device": options.device,
-        "results": []
-    }
-
-    # Ensure save_dir exists if provided
-    if options.save_dir:
-        os.makedirs(options.save_dir, exist_ok=True)
-
-    # Initialize pipeline (cached by config)
-    pipeline = get_pipeline(options)
-
-    # Per-request temp root
-    with tempfile.TemporaryDirectory(prefix="ppstructv3_") as req_tmpdir:
+async def parse(files: List[UploadFile] = File(...)):
+    """
+    Accept multiple image/PDF files and return structured JSON and Markdown
+    for each file, always including both outputs.
+    """
+    results: List[Dict[str, Any]] = []
+    temp_root = tempfile.mkdtemp(prefix="ppstructv3_")
+    try:
         for uf in files:
-            # Per-file working dir to isolate outputs
-            file_base_tmp = tempfile.mkdtemp(prefix="file_", dir=req_tmpdir)
-            # Keep original filename for extension handling
-            original_name = uf.filename or "upload"
-            _, ext = os.path.splitext(original_name)
-            tmp_path = os.path.join(file_base_tmp, f"input{ext or ''}")
+            # Persist upload to a temp path
+            file_suffix = os.path.splitext(uf.filename or "")[1] or ""
+            tmp_path = os.path.join(temp_root, next(tempfile._get_candidate_names()) + file_suffix)
+            with open(tmp_path, "wb") as out:
+                content = await uf.read()
+                out.write(content)
 
-            # Persist upload to disk for pipeline consumption (PDFs must be paths)
-            content = await uf.read()
-            with open(tmp_path, "wb") as f:
-                f.write(content)
+            # Predict; keep chart parsing off via the supported flag (stable behavior)
+            preds = PIPELINE.predict(tmp_path, use_chart_recognition=False)
 
-            # Native pipeline predict
-            # Docs: output is a list; for PDFs, each page is one result element
-            # We will save native JSON/Markdown and then re-load those to return.
-            preds = pipeline.predict(input=tmp_path)  # type: ignore  # API per docs
+            # Save native outputs and collect into response
+            file_work = os.path.join(temp_root, next(tempfile._get_candidate_names()))
+            os.makedirs(file_work, exist_ok=True)
+            pages = _save_and_collect_outputs(preds, file_work)
 
-            # Where to save native outputs for this file
-            native_out_dir = os.path.join(file_base_tmp, "native")
-            os.makedirs(native_out_dir, exist_ok=True)
+            combined_md = _combine_markdown_pages_from_res(PIPELINE, preds) if CONFIG.combine_markdown_pages else None
 
-            page_json: List[Dict[str, Any]] = []
-            page_markdown: List[str] = []
-
-            # Save page-wise results using native helpers
-            for res in preds:
-                if options.return_json:
-                    res.save_to_json(save_path=native_out_dir)  # per docs
-                if options.return_markdown:
-                    res.save_to_markdown(save_path=native_out_dir)  # per docs
-
-            # Collect files that were saved
-            if options.return_json:
-                for name in sorted(os.listdir(native_out_dir)):
-                    if name.lower().endswith(".json"):
-                        with open(os.path.join(native_out_dir, name), "r", encoding="utf-8") as jf:
-                            try:
-                                page_json.append(json.load(jf))
-                            except Exception:
-                                # As a fallback, return raw text if parse fails
-                                page_json.append({"raw_json": jf.read()})
-
-            if options.return_markdown:
-                for name in sorted(os.listdir(native_out_dir)):
-                    if name.lower().endswith(".md"):
-                        with open(os.path.join(native_out_dir, name), "r", encoding="utf-8") as mf:
-                            page_markdown.append(mf.read())
-
-            # Optionally persist native files to a user-provided directory
-            persisted_dir = None
-            if options.save_dir:
-                persisted_dir = os.path.join(options.save_dir, os.path.splitext(os.path.basename(original_name))[0])
-                os.makedirs(persisted_dir, exist_ok=True)
-                for name in os.listdir(native_out_dir):
-                    shutil.copy2(os.path.join(native_out_dir, name), os.path.join(persisted_dir, name))
-
-            response_payload["results"].append({
-                "filename": original_name,
-                "pages": len(preds),
-                "json": page_json if options.return_json else None,
-                "markdown": "\n\n".join(page_markdown) if options.return_markdown else None,
-                "markdown_pages": page_markdown if options.return_markdown else None,
-                "saved_to": persisted_dir
+            results.append({
+                "filename": uf.filename,
+                "pages": pages,
+                "markdown_combined": combined_md,
+                "config_used": asdict(CONFIG)
             })
 
-    return JSONResponse(response_payload)
-
-
-# Basic index
-@app.get("/")
-def index():
-    return {
-        "name": "PP-StructureV3 (FastAPI)",
-        "endpoints": {
-            "POST /parse": "Upload multiple files (images or PDFs) and get JSON + Markdown",
-            "GET /healthz": "Health check"
-        },
-        "tips": [
-            "For best accuracy on English medical lab reports, keep lang='en'.",
-            "If you need higher accuracy (slower), consider switching to server models via request options: "
-            "text_recognition_model_name='en_PP-OCRv5_server_rec', text_detection_model_name='PP-OCRv5_server_det'.",
-        ],
-        "docs": {
-            "pp-structurev3": "See official usage for predict/save_to_json/save_to_markdown.",
-            "installation": "See official PaddlePaddle/PaddleOCR installation notes."
-        }
-    }
+        return JSONResponse(content={"results": results})
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
