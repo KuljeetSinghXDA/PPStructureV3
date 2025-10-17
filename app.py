@@ -1,12 +1,5 @@
 # Set thread env vars BEFORE importing any numeric libs/Paddle to avoid OpenMP/BLAS issues on ARM64
-import os as _os
-_os.environ.setdefault("OMP_NUM_THREADS", "2")
-_os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
-_os.environ.setdefault("MKL_NUM_THREADS", "2")
-_os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "2")
-_os.environ.setdefault("NUMEXPR_NUM_THREADS", "2")
-# Keep MKLDNN off unless you explicitly enable it in the code below
-_os.environ.setdefault("FLAGS_use_mkldnn", "0")
+import os
 
 import io
 import json
