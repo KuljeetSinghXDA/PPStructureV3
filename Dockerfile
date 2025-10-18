@@ -5,20 +5,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# System deps for PDFs and image backends
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    poppler-utils \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
- && rm -rf /var/lib/apt/lists/*
-
-# PaddlePaddle CPU and PaddleOCR 3.2.0 doc-parser stack + FastAPI runtime deps
+# Minimal base: PyMuPDF handles PDF rasterization; headless OpenCV avoids GUI libs
 RUN python -m pip install --upgrade pip && \
     python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
-    python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
+    python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf "opencv-python-headless<5"
 
 # Embed the FastAPI app with heredoc
 RUN cat > /app.py << 'EOF'
@@ -28,10 +18,11 @@ from typing import List, Dict, Any, Literal, Optional
 from pathlib import Path
 import tempfile
 import shutil
-import os
 import json
 import threading
+from contextlib import contextmanager
 
+import fitz  # PyMuPDF
 from paddleocr import PPStructureV3
 
 # Service constants
@@ -39,10 +30,54 @@ ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
 
-# ==============================
-# Supported PP-StructureV3 params (None => defaults)
-# TUNED FOR MEDICAL LAB REPORTS
-# ==============================
+# =================================================
+# OCR ACCURACY PARAMETERS (tune these for accuracy)
+# =================================================
+
+# 1) PDF rasterization (pre-OCR)
+PDF_RASTER_DPI = 400  # 300–400 recommended for small fonts / dense tables
+
+# 2) Model selections (affect accuracy materially)
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
+TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
+TABLE_CLASSIFICATION_MODEL_NAME = None
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
+WIRED_TABLE_CELLS_DET_MODEL_NAME = None
+WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
+
+# 3) Layout thresholds / controls
+LAYOUT_THRESHOLD = None
+LAYOUT_NMS = None
+LAYOUT_UNCLIP_RATIO = None
+LAYOUT_MERGE_BBOXES_MODE = None
+
+# 4) Text detection tuning
+TEXT_DET_LIMIT_SIDE_LEN = None
+TEXT_DET_LIMIT_TYPE = None
+TEXT_DET_THRESH = None
+TEXT_DET_BOX_THRESH = None
+TEXT_DET_UNCLIP_RATIO = None
+
+# 5) Recognition controls
+REC_CHAR_DICT_PATH = None                  # custom charset for lab symbols / units
+REC_IMAGE_SHAPE = None                     # e.g., "3,48,320" (match model)
+USE_SPACE_CHAR = None                      # whether to output space
+MAX_TEXT_LENGTH = None                     # max decoded length
+USE_ANGLE_CLS = None                       # line-level angle classifier
+CLS_THRESH = None                          # angle classifier threshold
+DROP_SCORE = None                          # recognition drop score (filter)
+TEXT_REC_SCORE_THRESH = None               # mapped to rec.drop_score if set
+
+# 6) Table structure options
+TABLE_ALGORITHM = None                     # e.g., wired / wireless compatible head
+TABLE_CHAR_DICT_PATH = None
+TABLE_MAX_LEN = None                       # long-side for table crops
+
+# ======================================================
+# OPERATIONAL / RUNTIME PARAMETERS (performance / I/O)
+# ======================================================
 
 # Backend/config toggles
 DEVICE = "cpu"
@@ -51,14 +86,12 @@ ENABLE_HPI = False
 USE_TENSORRT = False
 PRECISION = None
 MKLDNN_CACHE_CAPACITY = 10
-
-# Threads
 CPU_THREADS = 4
 
-# Note: paddlex_config will be auto-built from constants below
+# Optional PaddleX config passthrough (auto-built if None)
 PADDLEX_CONFIG: Optional[Dict[str, Any]] = None
 
-# Subpipeline toggles
+# Pipeline composition toggles (non-text modules, flow control)
 USE_DOC_ORIENTATION_CLASSIFY = False
 USE_DOC_UNWARPING = False
 USE_TEXTLINE_ORIENTATION = False
@@ -68,26 +101,7 @@ USE_CHART_RECOGNITION = False
 USE_SEAL_RECOGNITION = False
 USE_REGION_DETECTION = True
 
-# Model names
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
-REGION_DETECTION_MODEL_NAME = None
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
-TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
-TABLE_CLASSIFICATION_MODEL_NAME = None
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
-WIRED_TABLE_CELLS_DET_MODEL_NAME = None
-WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
-TABLE_ORIENTATION_CLASSIFY_MODEL_NAME = None
-FORMULA_RECOGNITION_MODEL_NAME = None
-DOC_ORIENTATION_CLASSIFY_MODEL_NAME = None
-DOC_UNWARPING_MODEL_NAME = None
-TEXTLINE_ORIENTATION_MODEL_NAME = None
-SEAL_TEXT_DETECTION_MODEL_NAME = None
-SEAL_TEXT_RECOGNITION_MODEL_NAME = None
-CHART_RECOGNITION_MODEL_NAME = None
-
-# Model dirs - All None to use default downloads
+# Model dirs (overrides): keep None to auto-download defaults
 LAYOUT_DETECTION_MODEL_DIR = None
 REGION_DETECTION_MODEL_DIR = None
 TEXT_DETECTION_MODEL_DIR = None
@@ -106,37 +120,7 @@ SEAL_TEXT_DETECTION_MODEL_DIR = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
 CHART_RECOGNITION_MODEL_DIR = None
 
-# Layout thresholds/controls
-LAYOUT_THRESHOLD = None
-LAYOUT_NMS = None
-LAYOUT_UNCLIP_RATIO = None
-LAYOUT_MERGE_BBOXES_MODE = None
-
-# Text detection tuning
-TEXT_DET_LIMIT_SIDE_LEN = None
-TEXT_DET_LIMIT_TYPE = None
-TEXT_DET_THRESH = None
-TEXT_DET_BOX_THRESH = None
-TEXT_DET_UNCLIP_RATIO = None
-
-# Seal detection tuning
-SEAL_DET_LIMIT_SIDE_LEN = None
-SEAL_DET_LIMIT_TYPE = None
-SEAL_DET_THRESH = None
-SEAL_DET_BOX_THRESH = None
-SEAL_DET_UNCLIP_RATIO = None
-
-# Recognition controls
-REC_CHAR_DICT_PATH = None                  # path to custom charset file
-REC_IMAGE_SHAPE = None                     # e.g., "3,48,320"
-USE_SPACE_CHAR = None                      # bool
-MAX_TEXT_LENGTH = None                     # int
-USE_ANGLE_CLS = None                       # bool (line-level angle classifier)
-CLS_THRESH = None                          # float (angle classifier threshold)
-DROP_SCORE = None                          # alias for rec filtering if the build uses this name
-
-# Recognition thresholds/batches
-TEXT_REC_SCORE_THRESH = None               # top-level; also mapped to rec.drop_score if set
+# Batch sizes (performance/memory)
 TEXT_RECOGNITION_BATCH_SIZE = None
 TEXTLINE_ORIENTATION_BATCH_SIZE = None
 FORMULA_RECOGNITION_BATCH_SIZE = None
@@ -144,13 +128,7 @@ CHART_RECOGNITION_BATCH_SIZE = None
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 SEAL_REC_SCORE_THRESH = None
 
-# Table module options
-TABLE_ALGORITHM = None                     # e.g., "SLANeXt_wired" or model-compatible string
-TABLE_CHAR_DICT_PATH = None
-TABLE_MAX_LEN = None                       # long-side resize for table crops
-
 # Predict-time table recognition defaults
-# Must be False to avoid PaddleOCR 3.2.0 bug per community notes
 DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = False
 DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL = None
 DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL = None
@@ -158,16 +136,10 @@ DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML = None
 DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML = None
 DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = False
 
-def _ext_ok(filename: str) -> bool:
-    return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
+# Debug artifacts
+DEBUG_SAVE_ARTIFACTS = False
 
-def _file_exceeds_limit(tmp_path: Path) -> bool:
-    try:
-        return tmp_path.stat().st_size > MAX_FILE_SIZE_MB * 1024 * 1024
-    except Exception:
-        return False
-
-app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
+app = FastAPI(title="PP-StructureV3 API (ARM64, grouped params)", version="3.2.0")
 
 def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
     cfg: Dict[str, Any] = {}
@@ -186,12 +158,10 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
         rec_cfg["use_angle_cls"] = USE_ANGLE_CLS
     if CLS_THRESH is not None:
         rec_cfg["cls_thresh"] = CLS_THRESH
-    # Map global text_rec_score_thresh to rec.drop_score for older naming if provided
     if DROP_SCORE is not None:
         rec_cfg["drop_score"] = DROP_SCORE
     elif TEXT_REC_SCORE_THRESH is not None:
         rec_cfg["drop_score"] = TEXT_REC_SCORE_THRESH
-
     if rec_cfg:
         cfg["rec"] = rec_cfg
 
@@ -207,7 +177,6 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
         det_cfg["box_thresh"] = TEXT_DET_BOX_THRESH
     if TEXT_DET_UNCLIP_RATIO is not None:
         det_cfg["unclip_ratio"] = TEXT_DET_UNCLIP_RATIO
-
     if det_cfg:
         cfg["det"] = det_cfg
 
@@ -219,7 +188,6 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
         table_cfg["table_char_dict_path"] = TABLE_CHAR_DICT_PATH
     if TABLE_MAX_LEN is not None:
         table_cfg["table_max_len"] = TABLE_MAX_LEN
-
     if table_cfg:
         cfg["table"] = table_cfg
 
@@ -233,16 +201,13 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
         layout_cfg["unclip_ratio"] = LAYOUT_UNCLIP_RATIO
     if LAYOUT_MERGE_BBOXES_MODE is not None:
         layout_cfg["merge_bboxes_mode"] = LAYOUT_MERGE_BBOXES_MODE
-
     if layout_cfg:
         cfg["layout"] = layout_cfg
 
     return cfg or None
 
 def _build_init_kwargs() -> Dict[str, Any]:
-    # Build paddlex_config dynamically unless user supplied one
     px_cfg = PADDLEX_CONFIG if PADDLEX_CONFIG else _build_paddlex_config_from_constants()
-
     params = dict(
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
@@ -338,13 +303,28 @@ pipeline = PPStructureV3(**_init_kwargs)
 predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
 
 def _concat_markdown_pages(markdown_list: List[Dict[str, Any]]) -> str:
-    # Prefer top-level helper; fallback to PaddleX pipeline where needed
     if hasattr(pipeline, "concatenate_markdown_pages"):
         return pipeline.concatenate_markdown_pages(markdown_list)
     if hasattr(pipeline, "paddlex_pipeline"):
         return pipeline.paddlex_pipeline.concatenate_markdown_pages(markdown_list)
-    # Final fallback: minimal join (least preferred)
     return "\n\n".join([md.get("text", "") if isinstance(md, dict) else str(md) for md in markdown_list])
+
+@contextmanager
+def rasterized_pdf_paths(pdf_path: Path, dpi: int):
+    # Context-managed temp directory to avoid leaks
+    with tempfile.TemporaryDirectory(prefix="pdf_pages_") as td:
+        out_dir = Path(td)
+        doc = fitz.open(pdf_path)
+        scale = dpi / 72.0
+        mat = fitz.Matrix(scale, scale)
+        image_paths: List[Path] = []
+        for i in range(len(doc)):
+            pix = doc.load_page(i).get_pixmap(matrix=mat, alpha=False)
+            img_path = out_dir / f"page_{i:04d}.png"
+            pix.save(str(img_path))
+            image_paths.append(img_path)
+        yield image_paths
+    # Automatic cleanup by TemporaryDirectory
 
 def predict_collect_one(path: Path,
                         use_ocr_results_with_table_cells,
@@ -353,70 +333,95 @@ def predict_collect_one(path: Path,
                         use_wired_table_cells_trans_to_html,
                         use_wireless_table_cells_trans_to_html,
                         use_table_orientation_classify) -> Dict[str, Any]:
-    kwargs = {}
-    kwargs["use_ocr_results_with_table_cells"] = (
-        use_ocr_results_with_table_cells
-        if use_ocr_results_with_table_cells is not None
-        else DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS
-    )
-    kwargs["use_e2e_wired_table_rec_model"] = (
-        use_e2e_wired_table_rec_model
-        if use_e2e_wired_table_rec_model is not None
-        else DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL
-    )
-    kwargs["use_e2e_wireless_table_rec_model"] = (
-        use_e2e_wireless_table_rec_model
-        if use_e2e_wireless_table_rec_model is not None
-        else DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL
-    )
-    kwargs["use_wired_table_cells_trans_to_html"] = (
-        use_wired_table_cells_trans_to_html
-        if use_wired_table_cells_trans_to_html is not None
-        else DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML
-    )
-    kwargs["use_wireless_table_cells_trans_to_html"] = (
-        use_wireless_table_cells_trans_to_html
-        if use_wireless_table_cells_trans_to_html is not None
-        else DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML
-    )
-    kwargs["use_table_orientation_classify"] = (
-        use_table_orientation_classify
-        if use_table_orientation_classify is not None
-        else DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY
-    )
+    kwargs = {
+        "use_ocr_results_with_table_cells": (
+            use_ocr_results_with_table_cells
+            if use_ocr_results_with_table_cells is not None
+            else DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS
+        ),
+        "use_e2e_wired_table_rec_model": (
+            use_e2e_wired_table_rec_model
+            if use_e2e_wired_table_rec_model is not None
+            else DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL
+        ),
+        "use_e2e_wireless_table_rec_model": (
+            use_e2e_wireless_table_rec_model
+            if use_e2e_wireless_table_rec_model is not None
+            else DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL
+        ),
+        "use_wired_table_cells_trans_to_html": (
+            use_wired_table_cells_trans_to_html
+            if use_wired_table_cells_trans_to_html is not None
+            else DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML
+        ),
+        "use_wireless_table_cells_trans_to_html": (
+            use_wireless_table_cells_trans_to_html
+            if use_wireless_table_cells_trans_to_html is not None
+            else DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML
+        ),
+        "use_table_orientation_classify": (
+            use_table_orientation_classify
+            if use_table_orientation_classify is not None
+            else DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY
+        ),
+    }
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
-    outputs = pipeline.predict(str(path), **kwargs)
-
+    is_pdf = path.suffix.lower() == ".pdf"
     pages: List[Dict[str, Any]] = []
     markdown_list: List[Dict[str, Any]] = []
     markdown_images_list: List[Dict[str, Any]] = []
 
-    with tempfile.TemporaryDirectory() as out_dir:
-        out_dir = Path(out_dir)
+    if is_pdf:
+        with rasterized_pdf_paths(path, PDF_RASTER_DPI) as input_paths:
+            for p in input_paths:
+                outputs = pipeline.predict(str(p), **kwargs)
+                for res in outputs:
+                    if DEBUG_SAVE_ARTIFACTS:
+                        with tempfile.TemporaryDirectory() as out_dir:
+                            res.save_to_json(save_path=str(out_dir))
+                            res.save_to_markdown(save_path=str(out_dir))
+                    md_info = getattr(res, "markdown", {}) or {}
+                    markdown_list.append(md_info)
+                    markdown_images_list.append(md_info.get("markdown_images", {}) or {})
+                    page_json = {}
+                    if hasattr(res, "to_dict"):
+                        try:
+                            page_json = res.to_dict()
+                        except Exception:
+                            page_json = {}
+                    elif hasattr(res, "to_json"):
+                        try:
+                            j = res.to_json()
+                            page_json = json.loads(j) if isinstance(j, str) else (j or {})
+                        except Exception:
+                            page_json = {}
+                    page_md = md_info.get("text", "")
+                    pages.append({"page_index": len(pages), "json": page_json, "markdown": page_md})
+    else:
+        outputs = pipeline.predict(str(path), **kwargs)
         for res in outputs:
-            # Save page-level JSON and MD (useful for debugging/compat)
-            res.save_to_json(save_path=str(out_dir))
-            res.save_to_markdown(save_path=str(out_dir))
-            # Collect structured markdown dict and images for merged output
+            if DEBUG_SAVE_ARTIFACTS:
+                with tempfile.TemporaryDirectory() as out_dir:
+                    res.save_to_json(save_path=str(out_dir))
+                    res.save_to_markdown(save_path=str(out_dir))
             md_info = getattr(res, "markdown", {}) or {}
             markdown_list.append(md_info)
             markdown_images_list.append(md_info.get("markdown_images", {}) or {})
-
-        # Re-attach per-page artifacts
-        json_files = sorted(out_dir.glob("*.json"))
-        md_files = sorted(out_dir.glob("*.md"))
-        for i in range(max(len(json_files), len(md_files))):
             page_json = {}
-            page_md = ""
-            if i < len(json_files):
+            if hasattr(res, "to_dict"):
                 try:
-                    page_json = json.loads(json_files[i].read_text(encoding="utf-8"))
+                    page_json = res.to_dict()
                 except Exception:
                     page_json = {}
-            if i < len(md_files):
-                page_md = md_files[i].read_text(encoding="utf-8")
-            pages.append({"page_index": i, "json": page_json, "markdown": page_md})
+            elif hasattr(res, "to_json"):
+                try:
+                    j = res.to_json()
+                    page_json = json.loads(j) if isinstance(j, str) else (j or {})
+                except Exception:
+                    page_json = {}
+            page_md = md_info.get("text", "")
+            pages.append({"page_index": len(pages), "json": page_json, "markdown": page_md})
 
     merged_markdown = _concat_markdown_pages(markdown_list)
 
@@ -424,7 +429,7 @@ def predict_collect_one(path: Path,
         "pages": pages,
         "merged_markdown": merged_markdown,
         "markdown_images": markdown_images_list,
-        "page_count": len(outputs),
+        "page_count": len(pages),
     }
 
 @app.get("/health")
@@ -445,20 +450,19 @@ async def parse(
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
     outputs = []
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
-        acquired = predict_sem.acquire(timeout=600)
-        if not acquired:
-            raise HTTPException(status_code=503, detail="Server busy")
-        try:
+    acquired = predict_sem.acquire(timeout=600)
+    if not acquired:
+        raise HTTPException(status_code=503, detail="Server busy")
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
             for uf in files:
-                if not _ext_ok(uf.filename or ""):
+                if not (uf.filename and Path(uf.filename).suffix.lower() in ALLOWED_EXTENSIONS):
                     raise HTTPException(status_code=400, detail=f"Unsupported file type: {uf.filename}")
-                suffix = Path(uf.filename or "").suffix or ".bin"
-                target = tmpdir / (Path(uf.filename or f"upload{len(outputs)}{suffix}").name)
+                target = tmpdir / Path(uf.filename).name
                 with target.open("wb") as w:
                     shutil.copyfileobj(uf.file, w)
-                if _file_exceeds_limit(target):
+                if target.stat().st_size > MAX_FILE_SIZE_MB * 1024 * 1024:
                     raise HTTPException(status_code=400, detail=f"File too large (> {MAX_FILE_SIZE_MB} MB): {uf.filename}")
                 file_res = predict_collect_one(
                     target,
@@ -470,8 +474,8 @@ async def parse(
                     use_table_orientation_classify,
                 )
                 outputs.append({"filename": uf.filename, **file_res})
-        finally:
-            predict_sem.release()
+    finally:
+        predict_sem.release()
 
     if output_format == "json":
         return JSONResponse({"files": outputs})
