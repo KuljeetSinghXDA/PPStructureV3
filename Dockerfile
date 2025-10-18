@@ -3,22 +3,19 @@ FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    OPENCV_LOG_LEVEL=ERROR
+    PIP_NO_CACHE_DIR=1
 
-# No extra OS libs; rely on headless OpenCV and PyMuPDF
 
-# PaddlePaddle CPU, PaddleOCR 3.2.0 doc-parser, FastAPI, PyMuPDF
+# Minimal system dependencies for OpenCV (even in "headless" contexts, PaddleOCR may pull GUI build)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+ && rm -rf /var/lib/apt/lists/*
+
+# PaddlePaddle CPU and PaddleOCR 3.2.0 doc-parser stack + FastAPI runtime deps
 RUN python -m pip install --upgrade pip && \
     python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
-    python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf && \
-    python -m pip uninstall -y opencv-python opencv-contrib-python || true && \
-    python -m pip install --no-cache-dir --upgrade --force-reinstall "opencv-python-headless<5" && \
-    python - <<'PY'
-import cv2, sys
-print("cv2 version:", cv2.__version__)
-print("Loaded from:", cv2.__file__)
-PY
+    python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
 
 # Embed the FastAPI app with heredoc
 RUN cat > /app.py << 'EOF'
