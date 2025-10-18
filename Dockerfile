@@ -148,7 +148,7 @@ DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL = None      # Use default (None lets libra
 DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL = None   # Use default (None lets library decide)
 DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML = None    # Use default (None lets library decide)
 DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML = None # Use default (None lets library decide)
-DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = None    # MUST be False to avoid library bug at line 1310
+DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = False    # MUST be False to avoid library bug at line 1310
 
 # ==============================
 # END OF CONFIGURATION
