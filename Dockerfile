@@ -54,8 +54,8 @@ MAX_PARALLEL_PREDICT = 1
 DEVICE = "cpu"                  # Explicit CPU device
 ENABLE_MKLDNN = True            # Enable CPU optimization for better performance
 ENABLE_HPI = False              # Keep False on ARM64 to avoid PaddleX HPI plugin
-#USE_TENSORRT = None             # Not applicable for CPU
-#PRECISION = None                # FP32 default for CPU
+USE_TENSORRT = False             # Not applicable for CPU
+PRECISION = None                # FP32 default for CPU
 MKLDNN_CACHE_CAPACITY = 10      # Standard cache for MKL-DNN
 
 # Threads
