@@ -5,7 +5,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-
 # Minimal system dependencies for OpenCV (even in "headless" contexts, PaddleOCR may pull GUI build)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
@@ -42,6 +41,10 @@ MAX_PARALLEL_PREDICT = 1
 # ==============================
 # Accuracy-critical parameters (Medical lab reports)
 # ==============================
+
+# 0) Toggle pre-OCR rasterization (PDF upscaling)
+#    False => pass PDFs directly to PP-StructureV3 (native multi-page handling)
+USE_PDF_RASTERIZATION = False  # set True to re-enable PyMuPDF upscaling
 
 # 1) Input fidelity (pre-OCR rasterization)
 PDF_RASTER_DPI = 400  # 300–400 recommended
@@ -408,7 +411,33 @@ def predict_collect_one(path: Path,
     markdown_list: List[Dict[str, Any]] = []
     markdown_images_list: List[Dict[str, Any]] = []
 
-    if is_pdf:
+    if is_pdf and not USE_PDF_RASTERIZATION:
+        # Let PP-StructureV3 handle multi-page PDFs natively
+        outputs = pipeline.predict(str(path), **kwargs)
+        for res in outputs:
+            if DEBUG_SAVE_ARTIFACTS:
+                with tempfile.TemporaryDirectory() as out_dir:
+                    res.save_to_json(save_path=str(out_dir))
+                    res.save_to_markdown(save_path=str(out_dir))
+            md_info = getattr(res, "markdown", {}) or {}
+            markdown_list.append(md_info)
+            markdown_images_list.append(md_info.get("markdown_images", {}) or {})
+            page_json = {}
+            if hasattr(res, "to_dict"):
+                try:
+                    page_json = res.to_dict()
+                except Exception:
+                    page_json = {}
+            elif hasattr(res, "to_json"):
+                try:
+                    j = res.to_json()
+                    page_json = json.loads(j) if isinstance(j, str) else (j or {})
+                except Exception:
+                    page_json = {}
+            page_md = md_info.get("text", "")
+            pages.append({"page_index": len(pages), "json": page_json, "markdown": page_md})
+    elif is_pdf and USE_PDF_RASTERIZATION:
+        # Rasterize PDFs to high-DPI PNGs before OCR
         with rasterized_pdf_paths(path, PDF_RASTER_DPI) as input_paths:
             for p in input_paths:
                 outputs = pipeline.predict(str(p), **kwargs)
@@ -435,6 +464,7 @@ def predict_collect_one(path: Path,
                     page_md = md_info.get("text", "")
                     pages.append({"page_index": len(pages), "json": page_json, "markdown": page_md})
     else:
+        # Single image input path
         outputs = pipeline.predict(str(path), **kwargs)
         for res in outputs:
             if DEBUG_SAVE_ARTIFACTS:
