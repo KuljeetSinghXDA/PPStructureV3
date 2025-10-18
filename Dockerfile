@@ -1,30 +1,6 @@
-# Build on ARM64 host or use: docker build --platform=linux/arm64/v8
-FROM python:3.13-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
-
-# System deps for PDFs and image backends
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    poppler-utils \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
- && rm -rf /var/lib/apt/lists/*
-
-# PaddlePaddle CPU and PaddleOCR 3.2.0 doc-parser stack + FastAPI runtime deps
-RUN python -m pip install --upgrade pip && \
-    python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
-    python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
-
-# Embed the FastAPI app with heredoc
-RUN cat > /app.py << 'EOF'
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
-from typing import List, Dict, Any, Literal
+from typing import List, Dict, Any, Literal, Optional
 from pathlib import Path
 import tempfile
 import shutil
@@ -55,8 +31,8 @@ MKLDNN_CACHE_CAPACITY = 10
 # Threads
 CPU_THREADS = 4
 
-# Optional PaddleX config passthrough
-PADDLEX_CONFIG = None
+# Note: paddlex_config will be auto-built from constants below
+PADDLEX_CONFIG: Optional[Dict[str, Any]] = None
 
 # Subpipeline toggles
 USE_DOC_ORIENTATION_CLASSIFY = False
@@ -111,6 +87,8 @@ LAYOUT_THRESHOLD = None
 LAYOUT_NMS = None
 LAYOUT_UNCLIP_RATIO = None
 LAYOUT_MERGE_BBOXES_MODE = None
+# Optional category config placeholder (list of labels) if your layout model supports it
+LAYOUT_CATEGORIES = None  # e.g., ["title","text","figure","table"]
 
 # Text detection tuning
 TEXT_DET_LIMIT_SIDE_LEN = None
@@ -118,6 +96,15 @@ TEXT_DET_LIMIT_TYPE = None
 TEXT_DET_THRESH = None
 TEXT_DET_BOX_THRESH = None
 TEXT_DET_UNCLIP_RATIO = None
+# Extra postprocess control
+DET_USE_DILATION = None  # boolean
+
+# Region detection tuning (separate from layout)
+REGION_DET_LIMIT_SIDE_LEN = None
+REGION_DET_LIMIT_TYPE = None
+REGION_DET_THRESH = None
+REGION_DET_BOX_THRESH = None
+REGION_DET_UNCLIP_RATIO = None
 
 # Seal detection tuning
 SEAL_DET_LIMIT_SIDE_LEN = None
@@ -126,14 +113,32 @@ SEAL_DET_THRESH = None
 SEAL_DET_BOX_THRESH = None
 SEAL_DET_UNCLIP_RATIO = None
 
+# Recognition controls
+REC_CHAR_DICT_PATH = None                  # path to custom charset file
+REC_IMAGE_SHAPE = None                     # e.g., "3,48,320"
+USE_SPACE_CHAR = None                      # bool
+MAX_TEXT_LENGTH = None                     # int
+USE_ANGLE_CLS = None                       # bool (line-level angle classifier)
+CLS_THRESH = None                          # float (angle classifier threshold)
+DROP_SCORE = None                          # alias for rec filtering if the build uses this name
+
 # Recognition thresholds/batches
-TEXT_REC_SCORE_THRESH = None
+TEXT_REC_SCORE_THRESH = None               # top-level; also mapped to rec.drop_score if set
 TEXT_RECOGNITION_BATCH_SIZE = None
 TEXTLINE_ORIENTATION_BATCH_SIZE = None
 FORMULA_RECOGNITION_BATCH_SIZE = None
 CHART_RECOGNITION_BATCH_SIZE = None
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 SEAL_REC_SCORE_THRESH = None
+
+# Table module options
+TABLE_ALGORITHM = None                     # e.g., "SLANeXt_wired" or model-compatible string
+TABLE_CHAR_DICT_PATH = None
+TABLE_MAX_LEN = None                       # long-side resize for table crops
+
+# PDF/page handling
+PDF_RENDER_DPI = None                      # e.g., 300–400
+PAGE_INDICES = None                        # list of ints, e.g., [0,1,2]
 
 # Predict-time table recognition defaults
 # Must be False to avoid PaddleOCR 3.2.0 bug per community notes
@@ -155,7 +160,110 @@ def _file_exceeds_limit(tmp_path: Path) -> bool:
 
 app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
 
+def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
+    cfg: Dict[str, Any] = {}
+
+    # Recognition submodule
+    rec_cfg: Dict[str, Any] = {}
+    if REC_CHAR_DICT_PATH is not None:
+        rec_cfg["rec_char_dict_path"] = REC_CHAR_DICT_PATH
+    if REC_IMAGE_SHAPE is not None:
+        rec_cfg["rec_image_shape"] = REC_IMAGE_SHAPE
+    if USE_SPACE_CHAR is not None:
+        rec_cfg["use_space_char"] = USE_SPACE_CHAR
+    if MAX_TEXT_LENGTH is not None:
+        rec_cfg["max_text_length"] = MAX_TEXT_LENGTH
+    if USE_ANGLE_CLS is not None:
+        rec_cfg["use_angle_cls"] = USE_ANGLE_CLS
+    if CLS_THRESH is not None:
+        rec_cfg["cls_thresh"] = CLS_THRESH
+    # Map global text_rec_score_thresh to rec.drop_score for older naming if provided
+    if DROP_SCORE is not None:
+        rec_cfg["drop_score"] = DROP_SCORE
+    elif TEXT_REC_SCORE_THRESH is not None:
+        rec_cfg["drop_score"] = TEXT_REC_SCORE_THRESH
+
+    if rec_cfg:
+        cfg["rec"] = rec_cfg
+
+    # Detection submodule
+    det_cfg: Dict[str, Any] = {}
+    if TEXT_DET_LIMIT_SIDE_LEN is not None:
+        det_cfg["limit_side_len"] = TEXT_DET_LIMIT_SIDE_LEN
+    if TEXT_DET_LIMIT_TYPE is not None:
+        det_cfg["limit_type"] = TEXT_DET_LIMIT_TYPE
+    if TEXT_DET_THRESH is not None:
+        det_cfg["thresh"] = TEXT_DET_THRESH
+    if TEXT_DET_BOX_THRESH is not None:
+        det_cfg["box_thresh"] = TEXT_DET_BOX_THRESH
+    if TEXT_DET_UNCLIP_RATIO is not None:
+        det_cfg["unclip_ratio"] = TEXT_DET_UNCLIP_RATIO
+    if DET_USE_DILATION is not None:
+        det_cfg["use_dilation"] = DET_USE_DILATION
+
+    if det_cfg:
+        cfg["det"] = det_cfg
+
+    # Region detector submodule
+    region_cfg: Dict[str, Any] = {}
+    if REGION_DET_LIMIT_SIDE_LEN is not None:
+        region_cfg["limit_side_len"] = REGION_DET_LIMIT_SIDE_LEN
+    if REGION_DET_LIMIT_TYPE is not None:
+        region_cfg["limit_type"] = REGION_DET_LIMIT_TYPE
+    if REGION_DET_THRESH is not None:
+        region_cfg["thresh"] = REGION_DET_THRESH
+    if REGION_DET_BOX_THRESH is not None:
+        region_cfg["box_thresh"] = REGION_DET_BOX_THRESH
+    if REGION_DET_UNCLIP_RATIO is not None:
+        region_cfg["unclip_ratio"] = REGION_DET_UNCLIP_RATIO
+
+    if region_cfg:
+        cfg["region"] = region_cfg
+
+    # Table structure submodule
+    table_cfg: Dict[str, Any] = {}
+    if TABLE_ALGORITHM is not None:
+        table_cfg["table_algorithm"] = TABLE_ALGORITHM
+    if TABLE_CHAR_DICT_PATH is not None:
+        table_cfg["table_char_dict_path"] = TABLE_CHAR_DICT_PATH
+    if TABLE_MAX_LEN is not None:
+        table_cfg["table_max_len"] = TABLE_MAX_LEN
+
+    if table_cfg:
+        cfg["table"] = table_cfg
+
+    # Layout submodule
+    layout_cfg: Dict[str, Any] = {}
+    if LAYOUT_THRESHOLD is not None:
+        layout_cfg["threshold"] = LAYOUT_THRESHOLD
+    if LAYOUT_NMS is not None:
+        layout_cfg["nms"] = LAYOUT_NMS
+    if LAYOUT_UNCLIP_RATIO is not None:
+        layout_cfg["unclip_ratio"] = LAYOUT_UNCLIP_RATIO
+    if LAYOUT_MERGE_BBOXES_MODE is not None:
+        layout_cfg["merge_bboxes_mode"] = LAYOUT_MERGE_BBOXES_MODE
+    if LAYOUT_CATEGORIES is not None:
+        layout_cfg["categories"] = LAYOUT_CATEGORIES
+
+    if layout_cfg:
+        cfg["layout"] = layout_cfg
+
+    # Reader/input controls (PDF rasterization, page selection)
+    reader_cfg: Dict[str, Any] = {}
+    if PDF_RENDER_DPI is not None:
+        reader_cfg["pdf2img_dpi"] = PDF_RENDER_DPI
+    if PAGE_INDICES is not None:
+        reader_cfg["page_indices"] = PAGE_INDICES
+
+    if reader_cfg:
+        cfg["reader"] = reader_cfg
+
+    return cfg or None
+
 def _build_init_kwargs() -> Dict[str, Any]:
+    # Build paddlex_config dynamically unless user supplied one
+    px_cfg = PADDLEX_CONFIG if PADDLEX_CONFIG else _build_paddlex_config_from_constants()
+
     params = dict(
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
@@ -164,7 +272,7 @@ def _build_init_kwargs() -> Dict[str, Any]:
         precision=PRECISION,
         mkldnn_cache_capacity=MKLDNN_CACHE_CAPACITY,
         cpu_threads=CPU_THREADS,
-        paddlex_config=PADDLEX_CONFIG,
+        paddlex_config=px_cfg,
 
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
@@ -400,10 +508,3 @@ async def parse(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-EOF
-
-# Keep working directory simple for module import of /app.py
-WORKDIR /
-
-EXPOSE 8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
