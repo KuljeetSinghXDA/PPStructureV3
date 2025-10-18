@@ -3,18 +3,22 @@ FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    OPENCV_LOG_LEVEL=ERROR
 
-# Minimal system dependencies for OpenCV (even in "headless" contexts, PaddleOCR may pull GUI build)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 \
-    libglib2.0-0 \
- && rm -rf /var/lib/apt/lists/*
+# No extra OS libs; rely on headless OpenCV and PyMuPDF
 
-# PaddlePaddle CPU and PaddleOCR 3.2.0 doc-parser stack + FastAPI runtime deps
+# PaddlePaddle CPU, PaddleOCR 3.2.0 doc-parser, FastAPI, PyMuPDF
 RUN python -m pip install --upgrade pip && \
     python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
-    python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
+    python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf && \
+    python -m pip uninstall -y opencv-python opencv-contrib-python || true && \
+    python -m pip install --no-cache-dir --upgrade --force-reinstall "opencv-python-headless<5" && \
+    python - <<'PY'
+import cv2, sys
+print("cv2 version:", cv2.__version__)
+print("Loaded from:", cv2.__file__)
+PY
 
 # Embed the FastAPI app with heredoc
 RUN cat > /app.py << 'EOF'
@@ -40,11 +44,10 @@ MAX_PARALLEL_PREDICT = 1
 
 # ==============================
 # Accuracy-critical parameters (Medical lab reports)
-# Keep these together for tuning OCR accuracy
 # ==============================
 
 # 1) Input fidelity (pre-OCR rasterization)
-PDF_RASTER_DPI = 400  # 300–400 recommended for tiny text and thin gridlines
+PDF_RASTER_DPI = 400  # 300–400 recommended
 
 # 2) Layout detection
 LAYOUT_THRESHOLD = None
@@ -60,19 +63,19 @@ TEXT_DET_BOX_THRESH = None
 TEXT_DET_UNCLIP_RATIO = None
 
 # 4) Text recognition (decoder / charset / orientation)
-REC_CHAR_DICT_PATH = None                  # path to custom charset with µ, /, %, etc.
-REC_IMAGE_SHAPE = None                     # e.g., "3,48,320" for PP-OCRv5 rec
-USE_SPACE_CHAR = None                      # whether spaces are allowed
-MAX_TEXT_LENGTH = None                     # max decoded sequence length
-USE_ANGLE_CLS = None                       # enable angle classifier for rotated lines
-CLS_THRESH = None                          # angle classifier threshold
-DROP_SCORE = None                          # recognition filter (a.k.a. drop_score)
+REC_CHAR_DICT_PATH = None
+REC_IMAGE_SHAPE = None                     # e.g., "3,48,320"
+USE_SPACE_CHAR = None
+MAX_TEXT_LENGTH = None
+USE_ANGLE_CLS = None
+CLS_THRESH = None
+DROP_SCORE = None
 TEXT_REC_SCORE_THRESH = None               # mapped to rec.drop_score if set
 
-# 5) Table structure recognition (grids / headers)
-TABLE_ALGORITHM = None                     # e.g., model-compatible algorithm key
+# 5) Table structure recognition
+TABLE_ALGORITHM = None
 TABLE_CHAR_DICT_PATH = None
-TABLE_MAX_LEN = None                       # long-side resize for structure model
+TABLE_MAX_LEN = None
 
 # 6) Accuracy-relevant pipeline toggles
 USE_TABLE_RECOGNITION = True
@@ -83,7 +86,6 @@ USE_DOC_UNWARPING = False
 
 # ==============================
 # Other runtime / infra parameters
-# These generally affect performance, deployment, or feature breadth
 # ==============================
 
 # Backend/config toggles
@@ -100,7 +102,7 @@ CPU_THREADS = 4
 # PaddleX config passthrough (auto-built below if None)
 PADDLEX_CONFIG: Optional[Dict[str, Any]] = None
 
-# Optional modules (not typical for lab reports)
+# Optional modules
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 USE_SEAL_RECOGNITION = False
@@ -124,7 +126,7 @@ SEAL_TEXT_DETECTION_MODEL_NAME = None
 SEAL_TEXT_RECOGNITION_MODEL_NAME = None
 CHART_RECOGNITION_MODEL_NAME = None
 
-# Model dirs - All None to use default downloads
+# Model dirs
 LAYOUT_DETECTION_MODEL_DIR = None
 REGION_DETECTION_MODEL_DIR = None
 TEXT_DETECTION_MODEL_DIR = None
@@ -150,7 +152,7 @@ SEAL_DET_THRESH = None
 SEAL_DET_BOX_THRESH = None
 SEAL_DET_UNCLIP_RATIO = None
 
-# Recognition batch sizes (performance-oriented)
+# Recognition batch sizes
 TEXT_RECOGNITION_BATCH_SIZE = None
 TEXTLINE_ORIENTATION_BATCH_SIZE = None
 FORMULA_RECOGNITION_BATCH_SIZE = None
@@ -158,7 +160,7 @@ CHART_RECOGNITION_BATCH_SIZE = None
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 SEAL_REC_SCORE_THRESH = None
 
-# Predict-time table recognition defaults (feature behavior)
+# Predict-time table recognition defaults
 DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = False
 DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL = None
 DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL = None
@@ -169,16 +171,12 @@ DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = False
 # Diagnostics
 DEBUG_SAVE_ARTIFACTS = False
 
-# ==============================
-# App
-# ==============================
 app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
 
 def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
-    # Assemble submodule configs that PP-StructureV3 v3.x reads via PaddleX
     cfg: Dict[str, Any] = {}
 
-    # Recognition submodule
+    # Recognition
     rec_cfg: Dict[str, Any] = {}
     if REC_CHAR_DICT_PATH is not None:
         rec_cfg["rec_char_dict_path"] = REC_CHAR_DICT_PATH
@@ -199,7 +197,7 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
     if rec_cfg:
         cfg["rec"] = rec_cfg
 
-    # Detection submodule
+    # Detection
     det_cfg: Dict[str, Any] = {}
     if TEXT_DET_LIMIT_SIDE_LEN is not None:
         det_cfg["limit_side_len"] = TEXT_DET_LIMIT_SIDE_LEN
@@ -214,7 +212,7 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
     if det_cfg:
         cfg["det"] = det_cfg
 
-    # Table structure submodule
+    # Table
     table_cfg: Dict[str, Any] = {}
     if TABLE_ALGORITHM is not None:
         table_cfg["table_algorithm"] = TABLE_ALGORITHM
@@ -225,7 +223,7 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
     if table_cfg:
         cfg["table"] = table_cfg
 
-    # Layout submodule
+    # Layout
     layout_cfg: Dict[str, Any] = {}
     if LAYOUT_THRESHOLD is not None:
         layout_cfg["threshold"] = LAYOUT_THRESHOLD
@@ -243,7 +241,6 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
 def _build_init_kwargs() -> Dict[str, Any]:
     px_cfg = PADDLEX_CONFIG if PADDLEX_CONFIG else _build_paddlex_config_from_constants()
     params = dict(
-        # System / infra
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
@@ -253,7 +250,6 @@ def _build_init_kwargs() -> Dict[str, Any]:
         cpu_threads=CPU_THREADS,
         paddlex_config=px_cfg,
 
-        # Pipeline toggles (accuracy-related + optional modules)
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
@@ -263,7 +259,6 @@ def _build_init_kwargs() -> Dict[str, Any]:
         use_seal_recognition=USE_SEAL_RECOGNITION,
         use_region_detection=USE_REGION_DETECTION,
 
-        # Model selections
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         layout_detection_model_dir=LAYOUT_DETECTION_MODEL_DIR,
         region_detection_model_name=REGION_DETECTION_MODEL_NAME,
@@ -317,7 +312,6 @@ def _build_init_kwargs() -> Dict[str, Any]:
         chart_recognition_model_dir=CHART_RECOGNITION_MODEL_DIR,
         chart_recognition_batch_size=CHART_RECOGNITION_BATCH_SIZE,
 
-        # Redundant compatibility (some builds also accept these top-level)
         layout_threshold=LAYOUT_THRESHOLD,
         layout_nms=LAYOUT_NMS,
         layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
@@ -349,7 +343,6 @@ def _concat_markdown_pages(markdown_list: List[Dict[str, Any]]) -> str:
 
 @contextmanager
 def rasterized_pdf_paths(pdf_path: Path, dpi: int):
-    # Context-managed temp directory to avoid leaks
     with tempfile.TemporaryDirectory(prefix="pdf_pages_") as td:
         out_dir = Path(td)
         doc = fitz.open(pdf_path)
@@ -362,7 +355,6 @@ def rasterized_pdf_paths(pdf_path: Path, dpi: int):
             pix.save(str(img_path))
             image_paths.append(img_path)
         yield image_paths
-    # Automatic cleanup by TemporaryDirectory
 
 def _ext_ok(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
@@ -380,7 +372,6 @@ def predict_collect_one(path: Path,
                         use_wired_table_cells_trans_to_html,
                         use_wireless_table_cells_trans_to_html,
                         use_table_orientation_classify) -> Dict[str, Any]:
-    # Predict-time flags (kept intact)
     kwargs = {
         "use_ocr_results_with_table_cells": (
             use_ocr_results_with_table_cells
@@ -541,7 +532,6 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
 EOF
 
-# Keep working directory simple for module import of /app.py
 WORKDIR /
 
 EXPOSE 8000
