@@ -1,6 +1,3 @@
-Here is the full Dockerfile and app.py with every parameter retained, grouped so that all accuracy‑affecting knobs for medical lab reports are together and everything else is separate for easy tweaking.[1][2]
-
-```dockerfile
 # Build on ARM64 host or use: docker build --platform=linux/arm64/v8
 FROM python:3.13-slim
 
@@ -543,7 +540,3 @@ WORKDIR /
 
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-[1](https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/pipeline_usage/PP-StructureV3.html)
-[2](https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/module_usage/table_structure_recognition.html)
