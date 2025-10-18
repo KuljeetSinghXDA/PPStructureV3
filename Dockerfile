@@ -111,8 +111,6 @@ LAYOUT_THRESHOLD = None
 LAYOUT_NMS = None
 LAYOUT_UNCLIP_RATIO = None
 LAYOUT_MERGE_BBOXES_MODE = None
-# Optional category config placeholder (list of labels) if your layout model supports it
-LAYOUT_CATEGORIES = None  # e.g., ["title","text","figure","table"]
 
 # Text detection tuning
 TEXT_DET_LIMIT_SIDE_LEN = None
@@ -120,15 +118,6 @@ TEXT_DET_LIMIT_TYPE = None
 TEXT_DET_THRESH = None
 TEXT_DET_BOX_THRESH = None
 TEXT_DET_UNCLIP_RATIO = None
-# Extra postprocess control
-DET_USE_DILATION = None  # boolean
-
-# Region detection tuning (separate from layout)
-REGION_DET_LIMIT_SIDE_LEN = None
-REGION_DET_LIMIT_TYPE = None
-REGION_DET_THRESH = None
-REGION_DET_BOX_THRESH = None
-REGION_DET_UNCLIP_RATIO = None
 
 # Seal detection tuning
 SEAL_DET_LIMIT_SIDE_LEN = None
@@ -159,10 +148,6 @@ SEAL_REC_SCORE_THRESH = None
 TABLE_ALGORITHM = None                     # e.g., "SLANeXt_wired" or model-compatible string
 TABLE_CHAR_DICT_PATH = None
 TABLE_MAX_LEN = None                       # long-side resize for table crops
-
-# PDF/page handling
-PDF_RENDER_DPI = None                      # e.g., 300–400
-PAGE_INDICES = None                        # list of ints, e.g., [0,1,2]
 
 # Predict-time table recognition defaults
 # Must be False to avoid PaddleOCR 3.2.0 bug per community notes
@@ -222,27 +207,9 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
         det_cfg["box_thresh"] = TEXT_DET_BOX_THRESH
     if TEXT_DET_UNCLIP_RATIO is not None:
         det_cfg["unclip_ratio"] = TEXT_DET_UNCLIP_RATIO
-    if DET_USE_DILATION is not None:
-        det_cfg["use_dilation"] = DET_USE_DILATION
 
     if det_cfg:
         cfg["det"] = det_cfg
-
-    # Region detector submodule
-    region_cfg: Dict[str, Any] = {}
-    if REGION_DET_LIMIT_SIDE_LEN is not None:
-        region_cfg["limit_side_len"] = REGION_DET_LIMIT_SIDE_LEN
-    if REGION_DET_LIMIT_TYPE is not None:
-        region_cfg["limit_type"] = REGION_DET_LIMIT_TYPE
-    if REGION_DET_THRESH is not None:
-        region_cfg["thresh"] = REGION_DET_THRESH
-    if REGION_DET_BOX_THRESH is not None:
-        region_cfg["box_thresh"] = REGION_DET_BOX_THRESH
-    if REGION_DET_UNCLIP_RATIO is not None:
-        region_cfg["unclip_ratio"] = REGION_DET_UNCLIP_RATIO
-
-    if region_cfg:
-        cfg["region"] = region_cfg
 
     # Table structure submodule
     table_cfg: Dict[str, Any] = {}
@@ -266,21 +233,9 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
         layout_cfg["unclip_ratio"] = LAYOUT_UNCLIP_RATIO
     if LAYOUT_MERGE_BBOXES_MODE is not None:
         layout_cfg["merge_bboxes_mode"] = LAYOUT_MERGE_BBOXES_MODE
-    if LAYOUT_CATEGORIES is not None:
-        layout_cfg["categories"] = LAYOUT_CATEGORIES
 
     if layout_cfg:
         cfg["layout"] = layout_cfg
-
-    # Reader/input controls (PDF rasterization, page selection)
-    reader_cfg: Dict[str, Any] = {}
-    if PDF_RENDER_DPI is not None:
-        reader_cfg["pdf2img_dpi"] = PDF_RENDER_DPI
-    if PAGE_INDICES is not None:
-        reader_cfg["page_indices"] = PAGE_INDICES
-
-    if reader_cfg:
-        cfg["reader"] = reader_cfg
 
     return cfg or None
 
