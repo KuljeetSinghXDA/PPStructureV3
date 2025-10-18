@@ -35,61 +35,62 @@ from contextlib import contextmanager
 import fitz  # PyMuPDF
 from paddleocr import PPStructureV3
 
-# Service constants
+# ================================================================================
+# SERVICE CONSTANTS
+# ================================================================================
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
+DEBUG_SAVE_ARTIFACTS = False  # Set True to persist JSON/MD artifacts for debugging
 
-# =================================================
-# OCR ACCURACY PARAMETERS (tune these for accuracy)
-# =================================================
+# ================================================================================
+# OCR ACCURACY PARAMETERS — TUNE THESE FOR MEDICAL LAB REPORTS
+# ================================================================================
 
-# 1) PDF rasterization (pre-OCR)
-PDF_RASTER_DPI = 400  # 300–400 recommended for small fonts / dense tables
+# PDF rasterization DPI (higher = better for small fonts, but more memory)
+PDF_RASTER_DPI = 400  # 300–400 recommended for dense lab tables
 
-# 2) Model selections (affect accuracy materially)
-LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
-TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
-TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
-TABLE_CLASSIFICATION_MODEL_NAME = None
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
-WIRED_TABLE_CELLS_DET_MODEL_NAME = None
-WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
+# Layout detection thresholds & postprocessing
+LAYOUT_THRESHOLD = None           # e.g., 0.40 for high recall on small regions
+LAYOUT_NMS = None                 # True to suppress overlapping layout boxes
+LAYOUT_UNCLIP_RATIO = None        # e.g., 1.2 to slightly expand layout regions
+LAYOUT_MERGE_BBOXES_MODE = None   # "large" merges adjacent blocks; "none" keeps separate
 
-# 3) Layout thresholds / controls
-LAYOUT_THRESHOLD = None
-LAYOUT_NMS = None
-LAYOUT_UNCLIP_RATIO = None
-LAYOUT_MERGE_BBOXES_MODE = None
+# Text detection thresholds & geometry
+TEXT_DET_LIMIT_SIDE_LEN = None    # e.g., 1080 for small text preservation
+TEXT_DET_LIMIT_TYPE = None        # "max" constrains long side
+TEXT_DET_THRESH = None            # e.g., 0.30 for DB pixel threshold
+TEXT_DET_BOX_THRESH = None        # e.g., 0.50 for box confidence (lower = more recall)
+TEXT_DET_UNCLIP_RATIO = None      # e.g., 1.2 tightens boxes to avoid line merging
 
-# 4) Text detection tuning
-TEXT_DET_LIMIT_SIDE_LEN = None
-TEXT_DET_LIMIT_TYPE = None
-TEXT_DET_THRESH = None
-TEXT_DET_BOX_THRESH = None
-TEXT_DET_UNCLIP_RATIO = None
+# Text recognition controls
+REC_CHAR_DICT_PATH = None         # Path to custom charset (digits, A–Z, units, µ, %, etc.)
+REC_IMAGE_SHAPE = None            # e.g., "3,48,320" for PP-OCRv5
+USE_SPACE_CHAR = None             # True to emit spaces in recognized text
+MAX_TEXT_LENGTH = None            # Max sequence length for recognition decoder
+USE_ANGLE_CLS = None              # True to correct 180° line rotations
+CLS_THRESH = None                 # e.g., 0.9 for angle classifier confidence
+DROP_SCORE = None                 # Alias for recognition filtering threshold
+TEXT_REC_SCORE_THRESH = None      # e.g., 0.50 filters low-confidence recognitions
 
-# 5) Recognition controls
-REC_CHAR_DICT_PATH = None                  # custom charset for lab symbols / units
-REC_IMAGE_SHAPE = None                     # e.g., "3,48,320" (match model)
-USE_SPACE_CHAR = None                      # whether to output space
-MAX_TEXT_LENGTH = None                     # max decoded length
-USE_ANGLE_CLS = None                       # line-level angle classifier
-CLS_THRESH = None                          # angle classifier threshold
-DROP_SCORE = None                          # recognition drop score (filter)
-TEXT_REC_SCORE_THRESH = None               # mapped to rec.drop_score if set
+# Table structure recognition
+TABLE_ALGORITHM = None            # e.g., "SLANeXt_wired" for lab grids
+TABLE_CHAR_DICT_PATH = None       # Dictionary for table structure tokens
+TABLE_MAX_LEN = None              # e.g., 480–640 for wide table grids
 
-# 6) Table structure options
-TABLE_ALGORITHM = None                     # e.g., wired / wireless compatible head
-TABLE_CHAR_DICT_PATH = None
-TABLE_MAX_LEN = None                       # long-side for table crops
+# Seal detection & recognition (if seals present)
+SEAL_DET_LIMIT_SIDE_LEN = None
+SEAL_DET_LIMIT_TYPE = None
+SEAL_DET_THRESH = None
+SEAL_DET_BOX_THRESH = None
+SEAL_DET_UNCLIP_RATIO = None
+SEAL_REC_SCORE_THRESH = None
 
-# ======================================================
-# OPERATIONAL / RUNTIME PARAMETERS (performance / I/O)
-# ======================================================
+# ================================================================================
+# INFRASTRUCTURE & BACKEND CONFIGURATION
+# ================================================================================
 
-# Backend/config toggles
+# Hardware & runtime backend
 DEVICE = "cpu"
 ENABLE_MKLDNN = True
 ENABLE_HPI = False
@@ -98,10 +99,12 @@ PRECISION = None
 MKLDNN_CACHE_CAPACITY = 10
 CPU_THREADS = 4
 
-# Optional PaddleX config passthrough (auto-built if None)
+# PaddleX config (auto-built from constants; can override manually)
 PADDLEX_CONFIG: Optional[Dict[str, Any]] = None
 
-# Pipeline composition toggles (non-text modules, flow control)
+# ================================================================================
+# PIPELINE MODULE TOGGLES
+# ================================================================================
 USE_DOC_ORIENTATION_CLASSIFY = False
 USE_DOC_UNWARPING = False
 USE_TEXTLINE_ORIENTATION = False
@@ -111,45 +114,78 @@ USE_CHART_RECOGNITION = False
 USE_SEAL_RECOGNITION = False
 USE_REGION_DETECTION = True
 
-# Model dirs (overrides): keep None to auto-download defaults
+# ================================================================================
+# MODEL SELECTION (names and optional local dirs)
+# ================================================================================
+
+# Layout & region detection models
+LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 LAYOUT_DETECTION_MODEL_DIR = None
+REGION_DETECTION_MODEL_NAME = None
 REGION_DETECTION_MODEL_DIR = None
+
+# Text detection & recognition models
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_DETECTION_MODEL_DIR = None
+TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 TEXT_RECOGNITION_MODEL_DIR = None
+
+# Table models
+TABLE_CLASSIFICATION_MODEL_NAME = None
 TABLE_CLASSIFICATION_MODEL_DIR = None
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
 WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
+WIRED_TABLE_CELLS_DET_MODEL_NAME = None
 WIRED_TABLE_CELLS_DET_MODEL_DIR = None
+WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
 WIRELESS_TABLE_CELLS_DET_MODEL_DIR = None
+TABLE_ORIENTATION_CLASSIFY_MODEL_NAME = None
 TABLE_ORIENTATION_CLASSIFY_MODEL_DIR = None
+
+# Formula, doc orientation, unwarping, textline orientation models
+FORMULA_RECOGNITION_MODEL_NAME = None
 FORMULA_RECOGNITION_MODEL_DIR = None
+DOC_ORIENTATION_CLASSIFY_MODEL_NAME = None
 DOC_ORIENTATION_CLASSIFY_MODEL_DIR = None
+DOC_UNWARPING_MODEL_NAME = None
 DOC_UNWARPING_MODEL_DIR = None
+TEXTLINE_ORIENTATION_MODEL_NAME = None
 TEXTLINE_ORIENTATION_MODEL_DIR = None
+
+# Seal & chart models
+SEAL_TEXT_DETECTION_MODEL_NAME = None
 SEAL_TEXT_DETECTION_MODEL_DIR = None
+SEAL_TEXT_RECOGNITION_MODEL_NAME = None
 SEAL_TEXT_RECOGNITION_MODEL_DIR = None
+CHART_RECOGNITION_MODEL_NAME = None
 CHART_RECOGNITION_MODEL_DIR = None
 
-# Batch sizes (performance/memory)
+# ================================================================================
+# BATCH SIZES & OPERATIONAL PARAMETERS
+# ================================================================================
 TEXT_RECOGNITION_BATCH_SIZE = None
 TEXTLINE_ORIENTATION_BATCH_SIZE = None
 FORMULA_RECOGNITION_BATCH_SIZE = None
 CHART_RECOGNITION_BATCH_SIZE = None
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
-SEAL_REC_SCORE_THRESH = None
 
-# Predict-time table recognition defaults
-DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = False
+# ================================================================================
+# PREDICT-TIME TABLE RECOGNITION DEFAULTS
+# ================================================================================
+DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = False  # Must be False for 3.2.0 bug workaround
 DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL = None
 DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL = None
 DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML = None
 DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML = None
 DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = False
 
-# Debug artifacts
-DEBUG_SAVE_ARTIFACTS = False
+# ================================================================================
+# HELPER FUNCTIONS
+# ================================================================================
 
-app = FastAPI(title="PP-StructureV3 API (ARM64, grouped params)", version="3.2.0")
+app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
 
 def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
     cfg: Dict[str, Any] = {}
@@ -321,7 +357,6 @@ def _concat_markdown_pages(markdown_list: List[Dict[str, Any]]) -> str:
 
 @contextmanager
 def rasterized_pdf_paths(pdf_path: Path, dpi: int):
-    # Context-managed temp directory to avoid leaks
     with tempfile.TemporaryDirectory(prefix="pdf_pages_") as td:
         out_dir = Path(td)
         doc = fitz.open(pdf_path)
@@ -334,7 +369,6 @@ def rasterized_pdf_paths(pdf_path: Path, dpi: int):
             pix.save(str(img_path))
             image_paths.append(img_path)
         yield image_paths
-    # Automatic cleanup by TemporaryDirectory
 
 def predict_collect_one(path: Path,
                         use_ocr_results_with_table_cells,
@@ -384,8 +418,11 @@ def predict_collect_one(path: Path,
 
     if is_pdf:
         with rasterized_pdf_paths(path, PDF_RASTER_DPI) as input_paths:
+            outputs_per_page = []
             for p in input_paths:
                 outputs = pipeline.predict(str(p), **kwargs)
+                outputs_per_page.append(outputs)
+            for idx, outputs in enumerate(outputs_per_page):
                 for res in outputs:
                     if DEBUG_SAVE_ARTIFACTS:
                         with tempfile.TemporaryDirectory() as out_dir:
@@ -469,6 +506,7 @@ async def parse(
             for uf in files:
                 if not (uf.filename and Path(uf.filename).suffix.lower() in ALLOWED_EXTENSIONS):
                     raise HTTPException(status_code=400, detail=f"Unsupported file type: {uf.filename}")
+                suffix = Path(uf.filename).suffix or ".bin"
                 target = tmpdir / Path(uf.filename).name
                 with target.open("wb") as w:
                     shutil.copyfileobj(uf.file, w)
@@ -503,7 +541,6 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
 EOF
 
-# Keep working directory simple for module import of /app.py
 WORKDIR /
 
 EXPOSE 8000
