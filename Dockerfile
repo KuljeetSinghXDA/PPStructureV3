@@ -1,3 +1,27 @@
+# Build on ARM64 host or use: docker build --platform=linux/arm64/v8
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# System deps for PDFs and image backends
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+ && rm -rf /var/lib/apt/lists/*
+
+# PaddlePaddle CPU and PaddleOCR 3.2.0 doc-parser stack + FastAPI runtime deps
+RUN python -m pip install --upgrade pip && \
+    python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
+    python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
+
+# Embed the FastAPI app with heredoc
+RUN cat > /app.py << 'EOF'
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Literal
@@ -17,24 +41,24 @@ MAX_PARALLEL_PREDICT = 1
 
 # ==============================
 # Supported PP-StructureV3 params (None => defaults)
-# TUNED FOR MEDICAL LAB REPORTS: tables, small fonts, dense layouts
+# TUNED FOR MEDICAL LAB REPORTS
 # ==============================
 
 # Backend/config toggles
-DEVICE = "cpu"                  # Explicit CPU device
-ENABLE_MKLDNN = True            # Enable CPU optimization for better performance
-ENABLE_HPI = False              # Keep False on ARM64 to avoid PaddleX HPI plugin
-USE_TENSORRT = False            # Not applicable for CPU
-PRECISION = None                # FP32 default for CPU
-MKLDNN_CACHE_CAPACITY = 10      # Standard cache for MKL-DNN
+DEVICE = "cpu"
+ENABLE_MKLDNN = True
+ENABLE_HPI = False
+USE_TENSORRT = False
+PRECISION = None
+MKLDNN_CACHE_CAPACITY = 10
 
 # Threads
-CPU_THREADS = 4                 # Ampere A1 4 OCPU single-process
+CPU_THREADS = 4
 
-# Optional PaddleX config passthrough (kept None)
+# Optional PaddleX config passthrough
 PADDLEX_CONFIG = None
 
-# Subpipeline toggles - TUNED FOR LAB REPORTS
+# Subpipeline toggles
 USE_DOC_ORIENTATION_CLASSIFY = False
 USE_DOC_UNWARPING = False
 USE_TEXTLINE_ORIENTATION = False
@@ -112,7 +136,7 @@ SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 SEAL_REC_SCORE_THRESH = None
 
 # Predict-time table recognition defaults
-# CRITICAL: use_table_orientation_classify MUST be False to avoid PaddleOCR 3.2.0 bug
+# Must be False to avoid PaddleOCR 3.2.0 bug per community notes
 DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = False
 DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL = None
 DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL = None
@@ -232,7 +256,7 @@ def _concat_markdown_pages(markdown_list: List[Dict[str, Any]]) -> str:
         return pipeline.concatenate_markdown_pages(markdown_list)
     if hasattr(pipeline, "paddlex_pipeline"):
         return pipeline.paddlex_pipeline.concatenate_markdown_pages(markdown_list)
-    # Final fallback: simple join if helpers are missing (least preferred)
+    # Final fallback: minimal join (least preferred)
     return "\n\n".join([md.get("text", "") if isinstance(md, dict) else str(md) for md in markdown_list])
 
 def predict_collect_one(path: Path,
@@ -281,19 +305,18 @@ def predict_collect_one(path: Path,
     markdown_list: List[Dict[str, Any]] = []
     markdown_images_list: List[Dict[str, Any]] = []
 
-    # Optionally materialize per-page artifacts for debugging or compatibility
     with tempfile.TemporaryDirectory() as out_dir:
         out_dir = Path(out_dir)
         for res in outputs:
-            # Save page-level JSON and MD as in docs
+            # Save page-level JSON and MD (useful for debugging/compat)
             res.save_to_json(save_path=str(out_dir))
             res.save_to_markdown(save_path=str(out_dir))
-            # Collect structured markdown dict per page as in docs
+            # Collect structured markdown dict and images for merged output
             md_info = getattr(res, "markdown", {}) or {}
             markdown_list.append(md_info)
             markdown_images_list.append(md_info.get("markdown_images", {}) or {})
 
-        # Re-attach per-page JSON and MD text for clients that still need pages
+        # Re-attach per-page artifacts
         json_files = sorted(out_dir.glob("*.json"))
         md_files = sorted(out_dir.glob("*.md"))
         for i in range(max(len(json_files), len(md_files))):
@@ -364,19 +387,23 @@ async def parse(
             predict_sem.release()
 
     if output_format == "json":
-        # Return everything including merged_markdown and markdown_images
         return JSONResponse({"files": outputs})
     elif output_format == "markdown":
-        # Produce a single coherent Markdown document per file using the merged text
         combined_md = ""
         for f in outputs:
             combined_md += f"# {f['filename']}\n\n"
             combined_md += f.get("merged_markdown", "").strip() + "\n\n"
         return combined_md
     else:
-        # both: same as json to preserve merged_markdown and markdown_images for asset saving
         return JSONResponse({"files": outputs})
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+EOF
+
+# Keep working directory simple for module import of /app.py
+WORKDIR /
+
+EXPOSE 8000
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
