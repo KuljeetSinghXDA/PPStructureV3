@@ -1,33 +1,3 @@
-# Build on ARM64 host or use: docker build --platform=linux/arm64/v8
-FROM python:3.13-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 
-#    OMP_NUM_THREADS=4
-
-# System deps for PDFs and image backends
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    poppler-utils \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
- && rm -rf /var/lib/apt/lists/*
-
-# PaddlePaddle stable CPU (ARM64) and PaddleOCR 3.2.0 doc-parser group
-# Note: Ensure stable CPU index provides cp313 aarch64 wheels in your region mirror
-RUN python -m pip install --upgrade pip && \
-    python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
-    python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
-
-# Embedded FastAPI app:
-# - One long-lived PP-StructureV3 with requested models and accuracy tuning
-# - All supported init args exposed (None => library defaults)
-# - All documented table predict-time flags exposed (None => default)
-# - Native JSON/Markdown outputs; HPI not enabled for ARM64 stability
-RUN cat > /app.py << 'EOF'
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Literal
@@ -54,7 +24,7 @@ MAX_PARALLEL_PREDICT = 1
 DEVICE = "cpu"                  # Explicit CPU device
 ENABLE_MKLDNN = True            # Enable CPU optimization for better performance
 ENABLE_HPI = False              # Keep False on ARM64 to avoid PaddleX HPI plugin
-USE_TENSORRT = False             # Not applicable for CPU
+USE_TENSORRT = False            # Not applicable for CPU
 PRECISION = None                # FP32 default for CPU
 MKLDNN_CACHE_CAPACITY = 10      # Standard cache for MKL-DNN
 
@@ -65,16 +35,16 @@ CPU_THREADS = 4                 # Ampere A1 4 OCPU single-process
 PADDLEX_CONFIG = None
 
 # Subpipeline toggles - TUNED FOR LAB REPORTS
-USE_DOC_ORIENTATION_CLASSIFY = False      # Enable to handle rotated scans
-USE_DOC_UNWARPING = False                # Keep False on ARM64 for stability
-USE_TEXTLINE_ORIENTATION = False          # Enable for mixed orientation text
-USE_TABLE_RECOGNITION = True             # CRITICAL: Enable for lab report tables
-USE_FORMULA_RECOGNITION = False           # Not typically needed for lab reports
-USE_CHART_RECOGNITION = False             # Not typically needed for lab reports
-USE_SEAL_RECOGNITION = False              # Not typically needed for lab reports
-USE_REGION_DETECTION = True              # Let layout detection handle regions
+USE_DOC_ORIENTATION_CLASSIFY = False
+USE_DOC_UNWARPING = False
+USE_TEXTLINE_ORIENTATION = False
+USE_TABLE_RECOGNITION = True
+USE_FORMULA_RECOGNITION = False
+USE_CHART_RECOGNITION = False
+USE_SEAL_RECOGNITION = False
+USE_REGION_DETECTION = True
 
-# Model names (requested three set; others None) - DO NOT CHANGE
+# Model names
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 REGION_DETECTION_MODEL_NAME = None
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
@@ -141,18 +111,14 @@ CHART_RECOGNITION_BATCH_SIZE = None
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 SEAL_REC_SCORE_THRESH = None
 
-# Predict-time table recognition defaults - TUNED FOR LAB REPORTS
-# CRITICAL: use_table_orientation_classify MUST be False to avoid PaddleOCR 3.2.0 UnboundLocalError bug
-DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = None   # Use OCR results for better cell text accuracy
-DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL = None      # Use default (None lets library decide)
-DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL = None   # Use default (None lets library decide)
-DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML = None    # Use default (None lets library decide)
-DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML = None # Use default (None lets library decide)
-DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = False    # MUST be False to avoid library bug at line 1310
-
-# ==============================
-# END OF CONFIGURATION
-# ==============================
+# Predict-time table recognition defaults
+# CRITICAL: use_table_orientation_classify MUST be False to avoid PaddleOCR 3.2.0 bug
+DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = False
+DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL = None
+DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL = None
+DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML = None
+DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML = None
+DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = False
 
 def _ext_ok(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
@@ -165,7 +131,6 @@ def _file_exceeds_limit(tmp_path: Path) -> bool:
 
 app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
 
-# Init kwargs builder (filters None so library defaults apply)
 def _build_init_kwargs() -> Dict[str, Any]:
     params = dict(
         device=DEVICE,
@@ -257,14 +222,18 @@ def _build_init_kwargs() -> Dict[str, Any]:
     )
     return {k: v for k, v in params.items() if v is not None}
 
-# Build final init kwargs
 _init_kwargs = _build_init_kwargs()
-
-# Initialize pipeline with all tuning applied via _init_kwargs (no overrides below)
 pipeline = PPStructureV3(**_init_kwargs)
-
-# Gate to enforce one-at-a-time inference
 predict_sem = threading.Semaphore(value=MAX_PARALLEL_PREDICT)
+
+def _concat_markdown_pages(markdown_list: List[Dict[str, Any]]) -> str:
+    # Prefer top-level helper; fallback to PaddleX pipeline where needed
+    if hasattr(pipeline, "concatenate_markdown_pages"):
+        return pipeline.concatenate_markdown_pages(markdown_list)
+    if hasattr(pipeline, "paddlex_pipeline"):
+        return pipeline.paddlex_pipeline.concatenate_markdown_pages(markdown_list)
+    # Final fallback: simple join if helpers are missing (least preferred)
+    return "\n\n".join([md.get("text", "") if isinstance(md, dict) else str(md) for md in markdown_list])
 
 def predict_collect_one(path: Path,
                         use_ocr_results_with_table_cells,
@@ -274,59 +243,59 @@ def predict_collect_one(path: Path,
                         use_wireless_table_cells_trans_to_html,
                         use_table_orientation_classify) -> Dict[str, Any]:
     kwargs = {}
-    
-    # Apply user override or use default from top configuration section
     kwargs["use_ocr_results_with_table_cells"] = (
-        use_ocr_results_with_table_cells 
-        if use_ocr_results_with_table_cells is not None 
+        use_ocr_results_with_table_cells
+        if use_ocr_results_with_table_cells is not None
         else DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS
     )
-    
     kwargs["use_e2e_wired_table_rec_model"] = (
-        use_e2e_wired_table_rec_model 
-        if use_e2e_wired_table_rec_model is not None 
+        use_e2e_wired_table_rec_model
+        if use_e2e_wired_table_rec_model is not None
         else DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL
     )
-    
     kwargs["use_e2e_wireless_table_rec_model"] = (
-        use_e2e_wireless_table_rec_model 
-        if use_e2e_wireless_table_rec_model is not None 
+        use_e2e_wireless_table_rec_model
+        if use_e2e_wireless_table_rec_model is not None
         else DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL
     )
-    
     kwargs["use_wired_table_cells_trans_to_html"] = (
-        use_wired_table_cells_trans_to_html 
-        if use_wired_table_cells_trans_to_html is not None 
+        use_wired_table_cells_trans_to_html
+        if use_wired_table_cells_trans_to_html is not None
         else DEFAULT_USE_WIRED_TABLE_CELLS_TRANS_TO_HTML
     )
-    
     kwargs["use_wireless_table_cells_trans_to_html"] = (
-        use_wireless_table_cells_trans_to_html 
-        if use_wireless_table_cells_trans_to_html is not None 
+        use_wireless_table_cells_trans_to_html
+        if use_wireless_table_cells_trans_to_html is not None
         else DEFAULT_USE_WIRELESS_TABLE_CELLS_TRANS_TO_HTML
     )
-    
     kwargs["use_table_orientation_classify"] = (
-        use_table_orientation_classify 
-        if use_table_orientation_classify is not None 
+        use_table_orientation_classify
+        if use_table_orientation_classify is not None
         else DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY
     )
-    
-    # Filter out None values to let library use its internal defaults
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
     outputs = pipeline.predict(str(path), **kwargs)
-    pages = []
+
+    pages: List[Dict[str, Any]] = []
+    markdown_list: List[Dict[str, Any]] = []
+    markdown_images_list: List[Dict[str, Any]] = []
+
+    # Optionally materialize per-page artifacts for debugging or compatibility
     with tempfile.TemporaryDirectory() as out_dir:
         out_dir = Path(out_dir)
-        json_files, md_files = [], []
         for res in outputs:
+            # Save page-level JSON and MD as in docs
             res.save_to_json(save_path=str(out_dir))
             res.save_to_markdown(save_path=str(out_dir))
-        for p in sorted(out_dir.glob("*.json")):
-            json_files.append(p)
-        for p in sorted(out_dir.glob("*.md")):
-            md_files.append(p)
+            # Collect structured markdown dict per page as in docs
+            md_info = getattr(res, "markdown", {}) or {}
+            markdown_list.append(md_info)
+            markdown_images_list.append(md_info.get("markdown_images", {}) or {})
+
+        # Re-attach per-page JSON and MD text for clients that still need pages
+        json_files = sorted(out_dir.glob("*.json"))
+        md_files = sorted(out_dir.glob("*.md"))
         for i in range(max(len(json_files), len(md_files))):
             page_json = {}
             page_md = ""
@@ -338,7 +307,15 @@ def predict_collect_one(path: Path,
             if i < len(md_files):
                 page_md = md_files[i].read_text(encoding="utf-8")
             pages.append({"page_index": i, "json": page_json, "markdown": page_md})
-    return {"pages": pages}
+
+    merged_markdown = _concat_markdown_pages(markdown_list)
+
+    return {
+        "pages": pages,
+        "merged_markdown": merged_markdown,
+        "markdown_images": markdown_images_list,
+        "page_count": len(outputs),
+    }
 
 @app.get("/health")
 def health():
@@ -385,23 +362,21 @@ async def parse(
                 outputs.append({"filename": uf.filename, **file_res})
         finally:
             predict_sem.release()
+
     if output_format == "json":
+        # Return everything including merged_markdown and markdown_images
         return JSONResponse({"files": outputs})
     elif output_format == "markdown":
+        # Produce a single coherent Markdown document per file using the merged text
         combined_md = ""
         for f in outputs:
             combined_md += f"# {f['filename']}\n\n"
-            for pidx, page in enumerate(f["pages"]):
-                combined_md += f"## Page {pidx+1}\n\n{page['markdown']}\n\n"
+            combined_md += f.get("merged_markdown", "").strip() + "\n\n"
         return combined_md
     else:
+        # both: same as json to preserve merged_markdown and markdown_images for asset saving
         return JSONResponse({"files": outputs})
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-EOF
-
-WORKDIR /
-EXPOSE 8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
