@@ -40,6 +40,8 @@ MAX_PARALLEL_PREDICT = 1
 
 # ==============================
 # Accuracy-critical parameters (Medical lab reports)
+# (All tunables live under paddlex_config per module;
+#  TEXT_REC_SCORE_THRESH is the sole recognition filter.)
 # ==============================
 
 # 0) Toggle pre-OCR rasterization (PDF upscaling)
@@ -49,35 +51,36 @@ USE_PDF_RASTERIZATION = False  # set True to re-enable PyMuPDF upscaling
 # 1) Input fidelity (pre-OCR rasterization)
 PDF_RASTER_DPI = 400  # 300–400 recommended
 
-# 2) Layout detection
+# 2) Layout detection (paddlex_config['layout'])
 LAYOUT_THRESHOLD = None
 LAYOUT_NMS = None
 LAYOUT_UNCLIP_RATIO = None
 LAYOUT_MERGE_BBOXES_MODE = None
 
-# 3) Text detection (DB-style)
+# 3) Text detection (paddlex_config['det'])
 TEXT_DET_LIMIT_SIDE_LEN = None
 TEXT_DET_LIMIT_TYPE = None
 TEXT_DET_THRESH = None
 TEXT_DET_BOX_THRESH = None
 TEXT_DET_UNCLIP_RATIO = None
 
-# 4) Text recognition (decoder / charset / orientation)
+# 4) Text recognition (paddlex_config['rec'])
 REC_CHAR_DICT_PATH = None
 REC_IMAGE_SHAPE = None                     # e.g., "3,48,320"
 USE_SPACE_CHAR = None
 MAX_TEXT_LENGTH = None
 USE_ANGLE_CLS = None
 CLS_THRESH = None
-DROP_SCORE = None
-TEXT_REC_SCORE_THRESH = None               # mapped to rec.drop_score if set
 
-# 5) Table structure recognition
+# Recognition confidence filter (single source of truth)
+TEXT_REC_SCORE_THRESH = None               # forwarded as top-level kwarg
+
+# 5) Table structure recognition (paddlex_config['table'])
 TABLE_ALGORITHM = None
 TABLE_CHAR_DICT_PATH = None
 TABLE_MAX_LEN = None
 
-# 6) Accuracy-relevant pipeline toggles
+# 6) Accuracy-relevant pipeline toggles (constructor flags)
 USE_TABLE_RECOGNITION = True
 USE_REGION_DETECTION = True
 USE_TEXTLINE_ORIENTATION = False
@@ -102,22 +105,16 @@ CPU_THREADS = 4
 # PaddleX config passthrough (auto-built below if None)
 PADDLEX_CONFIG: Optional[Dict[str, Any]] = None
 
-# Optional modules
+# Optional modules (feature breadth)
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 USE_SEAL_RECOGNITION = False
 
-# Model names
+# Minimal model names (rely on defaults where possible)
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 REGION_DETECTION_MODEL_NAME = None
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
-TABLE_CLASSIFICATION_MODEL_NAME = None
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
-WIRED_TABLE_CELLS_DET_MODEL_NAME = None
-WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
-TABLE_ORIENTATION_CLASSIFY_MODEL_NAME = None
 FORMULA_RECOGNITION_MODEL_NAME = None
 DOC_ORIENTATION_CLASSIFY_MODEL_NAME = None
 DOC_UNWARPING_MODEL_NAME = None
@@ -126,17 +123,11 @@ SEAL_TEXT_DETECTION_MODEL_NAME = None
 SEAL_TEXT_RECOGNITION_MODEL_NAME = None
 CHART_RECOGNITION_MODEL_NAME = None
 
-# Model dirs
+# Model dirs (None => default downloads)
 LAYOUT_DETECTION_MODEL_DIR = None
 REGION_DETECTION_MODEL_DIR = None
 TEXT_DETECTION_MODEL_DIR = None
 TEXT_RECOGNITION_MODEL_DIR = None
-TABLE_CLASSIFICATION_MODEL_DIR = None
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
-WIRED_TABLE_CELLS_DET_MODEL_DIR = None
-WIRELESS_TABLE_CELLS_DET_MODEL_DIR = None
-TABLE_ORIENTATION_CLASSIFY_MODEL_DIR = None
 FORMULA_RECOGNITION_MODEL_DIR = None
 DOC_ORIENTATION_CLASSIFY_MODEL_DIR = None
 DOC_UNWARPING_MODEL_DIR = None
@@ -152,7 +143,7 @@ SEAL_DET_THRESH = None
 SEAL_DET_BOX_THRESH = None
 SEAL_DET_UNCLIP_RATIO = None
 
-# Recognition batch sizes
+# Optional batch sizes (performance levers)
 TEXT_RECOGNITION_BATCH_SIZE = None
 TEXTLINE_ORIENTATION_BATCH_SIZE = None
 FORMULA_RECOGNITION_BATCH_SIZE = None
@@ -160,7 +151,7 @@ CHART_RECOGNITION_BATCH_SIZE = None
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 SEAL_REC_SCORE_THRESH = None
 
-# Predict-time table recognition defaults
+# Predict-time table recognition defaults (feature behavior)
 DEFAULT_USE_OCR_RESULTS_WITH_TABLE_CELLS = False
 DEFAULT_USE_E2E_WIRED_TABLE_REC_MODEL = None
 DEFAULT_USE_E2E_WIRELESS_TABLE_REC_MODEL = None
@@ -171,12 +162,16 @@ DEFAULT_USE_TABLE_ORIENTATION_CLASSIFY = False
 # Diagnostics
 DEBUG_SAVE_ARTIFACTS = False
 
+# ==============================
+# App
+# ==============================
 app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
 
 def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
+    # Assemble submodule configs that PP-StructureV3 v3.x reads via PaddleX
     cfg: Dict[str, Any] = {}
 
-    # Recognition
+    # Recognition submodule
     rec_cfg: Dict[str, Any] = {}
     if REC_CHAR_DICT_PATH is not None:
         rec_cfg["rec_char_dict_path"] = REC_CHAR_DICT_PATH
@@ -190,14 +185,10 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
         rec_cfg["use_angle_cls"] = USE_ANGLE_CLS
     if CLS_THRESH is not None:
         rec_cfg["cls_thresh"] = CLS_THRESH
-    if DROP_SCORE is not None:
-        rec_cfg["drop_score"] = DROP_SCORE
-    elif TEXT_REC_SCORE_THRESH is not None:
-        rec_cfg["drop_score"] = TEXT_REC_SCORE_THRESH
     if rec_cfg:
         cfg["rec"] = rec_cfg
 
-    # Detection
+    # Detection submodule
     det_cfg: Dict[str, Any] = {}
     if TEXT_DET_LIMIT_SIDE_LEN is not None:
         det_cfg["limit_side_len"] = TEXT_DET_LIMIT_SIDE_LEN
@@ -212,7 +203,7 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
     if det_cfg:
         cfg["det"] = det_cfg
 
-    # Table
+    # Table structure submodule
     table_cfg: Dict[str, Any] = {}
     if TABLE_ALGORITHM is not None:
         table_cfg["table_algorithm"] = TABLE_ALGORITHM
@@ -223,7 +214,7 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
     if table_cfg:
         cfg["table"] = table_cfg
 
-    # Layout
+    # Layout submodule
     layout_cfg: Dict[str, Any] = {}
     if LAYOUT_THRESHOLD is not None:
         layout_cfg["threshold"] = LAYOUT_THRESHOLD
@@ -241,6 +232,7 @@ def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
 def _build_init_kwargs() -> Dict[str, Any]:
     px_cfg = PADDLEX_CONFIG if PADDLEX_CONFIG else _build_paddlex_config_from_constants()
     params = dict(
+        # System / infra
         device=DEVICE,
         enable_mkldnn=ENABLE_MKLDNN,
         enable_hpi=ENABLE_HPI,
@@ -250,6 +242,7 @@ def _build_init_kwargs() -> Dict[str, Any]:
         cpu_threads=CPU_THREADS,
         paddlex_config=px_cfg,
 
+        # Pipeline toggles
         use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
         use_doc_unwarping=USE_DOC_UNWARPING,
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
@@ -259,6 +252,7 @@ def _build_init_kwargs() -> Dict[str, Any]:
         use_seal_recognition=USE_SEAL_RECOGNITION,
         use_region_detection=USE_REGION_DETECTION,
 
+        # Minimal model selections
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         layout_detection_model_dir=LAYOUT_DETECTION_MODEL_DIR,
         region_detection_model_name=REGION_DETECTION_MODEL_NAME,
@@ -268,22 +262,6 @@ def _build_init_kwargs() -> Dict[str, Any]:
         text_detection_model_dir=TEXT_DETECTION_MODEL_DIR,
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
         text_recognition_model_dir=TEXT_RECOGNITION_MODEL_DIR,
-
-        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
-        table_classification_model_dir=TABLE_CLASSIFICATION_MODEL_DIR,
-
-        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wired_table_structure_recognition_model_dir=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR,
-        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
-        wireless_table_structure_recognition_model_dir=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR,
-
-        wired_table_cells_detection_model_name=WIRED_TABLE_CELLS_DET_MODEL_NAME,
-        wired_table_cells_detection_model_dir=WIRED_TABLE_CELLS_DET_MODEL_DIR,
-        wireless_table_cells_detection_model_name=WIRELESS_TABLE_CELLS_DET_MODEL_NAME,
-        wireless_table_cells_detection_model_dir=WIRELESS_TABLE_CELLS_DET_MODEL_DIR,
-
-        table_orientation_classify_model_name=TABLE_ORIENTATION_CLASSIFY_MODEL_NAME,
-        table_orientation_classify_model_dir=TABLE_ORIENTATION_CLASSIFY_MODEL_DIR,
 
         formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
         formula_recognition_model_dir=FORMULA_RECOGNITION_MODEL_DIR,
@@ -312,6 +290,7 @@ def _build_init_kwargs() -> Dict[str, Any]:
         chart_recognition_model_dir=CHART_RECOGNITION_MODEL_DIR,
         chart_recognition_batch_size=CHART_RECOGNITION_BATCH_SIZE,
 
+        # Redundant compatibility (fallback if a build reads top-level)
         layout_threshold=LAYOUT_THRESHOLD,
         layout_nms=LAYOUT_NMS,
         layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
@@ -323,7 +302,10 @@ def _build_init_kwargs() -> Dict[str, Any]:
         text_det_box_thresh=TEXT_DET_BOX_THRESH,
         text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
 
+        # Sole recognition filter (top-level)
         text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
+
+        # Optional batch sizes
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
         textline_orientation_batch_size=TEXTLINE_ORIENTATION_BATCH_SIZE,
         formula_recognition_batch_size=FORMULA_RECOGNITION_BATCH_SIZE,
