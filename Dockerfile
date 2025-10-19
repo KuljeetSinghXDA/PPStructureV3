@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # PaddlePaddle CPU and PaddleOCR 3.2.0 doc-parser stack + FastAPI runtime deps
 RUN python -m pip install --upgrade pip && \
-    python -m pip install paddlepaddle -i [https://www.paddlepaddle.org.cn/packages/stable/cpu/](https://www.paddlepaddle.org.cn/packages/stable/cpu/) && \
+    python -m pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
     python -m pip install "paddleocr[doc-parser]==3.2.0" fastapi "uvicorn[standard]" python-multipart pymupdf
 
 # Embed the FastAPI app with heredoc
