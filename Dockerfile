@@ -20,7 +20,7 @@ RUN python -m pip install --upgrade pip && \
 RUN cat > /app.py << 'EOF'
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
-from typing import List, Dict, Any, Literal, Optional
+from typing import List, Dict, Any, Optional
 from pathlib import Path
 import tempfile
 import shutil
@@ -35,96 +35,150 @@ ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp"}
 MAX_FILE_SIZE_MB = 50
 MAX_PARALLEL_PREDICT = 1
 
+
 USE_PDF_RASTERIZATION = False  # set True to re-enable PyMuPDF upscaling
+
 PDF_RASTER_DPI = 400  # 300–400 recommended
 
-# ==============================
-# PP-StructureV3-only parameters (kept)
-# ==============================
 
-# Layout controls
+# PP-StructureV3-only layout knobs
 LAYOUT_THRESHOLD = None
 LAYOUT_NMS = None
 LAYOUT_UNCLIP_RATIO = None
 LAYOUT_MERGE_BBOXES_MODE = None
 
-# Pipeline toggles unique to StructureV3
+# Shared text detection/recognition thresholds
+TEXT_DET_LIMIT_SIDE_LEN = None
+TEXT_DET_LIMIT_TYPE = None
+TEXT_DET_THRESH = None
+TEXT_DET_BOX_THRESH = None
+TEXT_DET_UNCLIP_RATIO = None
+TEXT_REC_SCORE_THRESH = None
+
+# Pipeline toggles
 USE_TABLE_RECOGNITION = True
 USE_REGION_DETECTION = True
+USE_TEXTLINE_ORIENTATION = False
+USE_DOC_ORIENTATION_CLASSIFY = False
+USE_DOC_UNWARPING = False
+
+# Perf/runtime controls
+DEVICE = "cpu"
+ENABLE_MKLDNN = True
+ENABLE_HPI = False
+USE_TENSORRT = False
+PRECISION = None
+MKLDNN_CACHE_CAPACITY = 10
+CPU_THREADS = 4
+
+# Optional external PaddleX config (kept as pass-through only)
+PADDLEX_CONFIG = None
+
+# Optional modules toggles (PP-StructureV3)
 USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 USE_SEAL_RECOGNITION = False
 
-# Model names/dirs for StructureV3-exclusive modules
+
+# Model names (shared + PP-StructureV3-only)
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
-LAYOUT_DETECTION_MODEL_DIR = None
-
 REGION_DETECTION_MODEL_NAME = None
-REGION_DETECTION_MODEL_DIR = None
-
+TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
+TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 TABLE_CLASSIFICATION_MODEL_NAME = None
-TABLE_CLASSIFICATION_MODEL_DIR = None
 WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
-WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
 WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
-WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
 WIRED_TABLE_CELLS_DET_MODEL_NAME = None
-WIRED_TABLE_CELLS_DET_MODEL_DIR = None
 WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
-WIRELESS_TABLE_CELLS_DET_MODEL_DIR = None
 TABLE_ORIENTATION_CLASSIFY_MODEL_NAME = None
-TABLE_ORIENTATION_CLASSIFY_MODEL_DIR = None
-
 FORMULA_RECOGNITION_MODEL_NAME = None
-FORMULA_RECOGNITION_MODEL_DIR = None
-FORMULA_RECOGNITION_BATCH_SIZE = None
-
-CHART_RECOGNITION_MODEL_NAME = None
-CHART_RECOGNITION_MODEL_DIR = None
-CHART_RECOGNITION_BATCH_SIZE = None
-
+DOC_ORIENTATION_CLASSIFY_MODEL_NAME = None
+DOC_UNWARPING_MODEL_NAME = None
+TEXTLINE_ORIENTATION_MODEL_NAME = None
 SEAL_TEXT_DETECTION_MODEL_NAME = None
+SEAL_TEXT_RECOGNITION_MODEL_NAME = None
+CHART_RECOGNITION_MODEL_NAME = None
+
+# Model dirs (shared + PP-StructureV3-only)
+LAYOUT_DETECTION_MODEL_DIR = None
+REGION_DETECTION_MODEL_DIR = None
+TEXT_DETECTION_MODEL_DIR = None
+TEXT_RECOGNITION_MODEL_DIR = None
+TABLE_CLASSIFICATION_MODEL_DIR = None
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
+WIRED_TABLE_CELLS_DET_MODEL_DIR = None
+WIRELESS_TABLE_CELLS_DET_MODEL_DIR = None
+TABLE_ORIENTATION_CLASSIFY_MODEL_DIR = None
+FORMULA_RECOGNITION_MODEL_DIR = None
+DOC_ORIENTATION_CLASSIFY_MODEL_DIR = None
+DOC_UNWARPING_MODEL_DIR = None
+TEXTLINE_ORIENTATION_MODEL_DIR = None
 SEAL_TEXT_DETECTION_MODEL_DIR = None
+SEAL_TEXT_RECOGNITION_MODEL_DIR = None
+CHART_RECOGNITION_MODEL_DIR = None
+
+# PP-StructureV3-only seal detection thresholds/limits
 SEAL_DET_LIMIT_SIDE_LEN = None
 SEAL_DET_LIMIT_TYPE = None
 SEAL_DET_THRESH = None
 SEAL_DET_BOX_THRESH = None
 SEAL_DET_UNCLIP_RATIO = None
-SEAL_TEXT_RECOGNITION_MODEL_NAME = None
-SEAL_TEXT_RECOGNITION_MODEL_DIR = None
+
+# Batch sizes and thresholds (shared + PP-StructureV3-only)
+TEXT_RECOGNITION_BATCH_SIZE = None
+TEXTLINE_ORIENTATION_BATCH_SIZE = None
+FORMULA_RECOGNITION_BATCH_SIZE = None
+CHART_RECOGNITION_BATCH_SIZE = None
 SEAL_TEXT_RECOGNITION_BATCH_SIZE = None
 SEAL_REC_SCORE_THRESH = None
 
-# App debug
-DEBUG_SAVE_ARTIFACTS = False
 
 # ==============================
 # App
 # ==============================
 app = FastAPI(title="PP-StructureV3 API (ARM64, native)", version="3.2.0")
 
+def _build_paddlex_config_from_constants() -> Optional[Dict[str, Any]]:
+    # No det/layout injection here to avoid duplication with top-level kwargs
+    cfg: Dict[str, Any] = {}
+    return cfg or None
+
 def _build_init_kwargs() -> Dict[str, Any]:
+    px_cfg = PADDLEX_CONFIG if PADDLEX_CONFIG else _build_paddlex_config_from_constants()
     params = dict(
-        # StructureV3 toggles
+        # System / infra
+        device=DEVICE,
+        enable_mkldnn=ENABLE_MKLDNN,
+        enable_hpi=ENABLE_HPI,
+        use_tensorrt=USE_TENSORRT,
+        precision=PRECISION,
+        mkldnn_cache_capacity=MKLDNN_CACHE_CAPACITY,
+        cpu_threads=CPU_THREADS,
+        paddlex_config=px_cfg,
+
+        # Pipeline toggles
+        use_doc_orientation_classify=USE_DOC_ORIENTATION_CLASSIFY,
+        use_doc_unwarping=USE_DOC_UNWARPING,
+        use_textline_orientation=USE_TEXTLINE_ORIENTATION,
         use_table_recognition=USE_TABLE_RECOGNITION,
-        use_region_detection=USE_REGION_DETECTION,
         use_formula_recognition=USE_FORMULA_RECOGNITION,
         use_chart_recognition=USE_CHART_RECOGNITION,
         use_seal_recognition=USE_SEAL_RECOGNITION,
+        use_region_detection=USE_REGION_DETECTION,
 
-        # Layout
+        # Core model selections
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         layout_detection_model_dir=LAYOUT_DETECTION_MODEL_DIR,
-        layout_threshold=LAYOUT_THRESHOLD,
-        layout_nms=LAYOUT_NMS,
-        layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
-        layout_merge_bboxes_mode=LAYOUT_MERGE_BBOXES_MODE,
-
-        # Region detection
         region_detection_model_name=REGION_DETECTION_MODEL_NAME,
         region_detection_model_dir=REGION_DETECTION_MODEL_DIR,
 
-        # Table recognition family
+        text_detection_model_name=TEXT_DETECTION_MODEL_NAME,
+        text_detection_model_dir=TEXT_DETECTION_MODEL_DIR,
+        text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
+        text_recognition_model_dir=TEXT_RECOGNITION_MODEL_DIR,
+
+        # Table recognition family (optional)
         table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
         table_classification_model_dir=TABLE_CLASSIFICATION_MODEL_DIR,
         wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
@@ -138,28 +192,51 @@ def _build_init_kwargs() -> Dict[str, Any]:
         table_orientation_classify_model_name=TABLE_ORIENTATION_CLASSIFY_MODEL_NAME,
         table_orientation_classify_model_dir=TABLE_ORIENTATION_CLASSIFY_MODEL_DIR,
 
-        # Formula
+        # Other optional modules
         formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
         formula_recognition_model_dir=FORMULA_RECOGNITION_MODEL_DIR,
-        formula_recognition_batch_size=FORMULA_RECOGNITION_BATCH_SIZE,
-
-        # Chart
-        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
-        chart_recognition_model_dir=CHART_RECOGNITION_MODEL_DIR,
-        chart_recognition_batch_size=CHART_RECOGNITION_BATCH_SIZE,
-
-        # Seal
+        doc_orientation_classify_model_name=DOC_ORIENTATION_CLASSIFY_MODEL_NAME,
+        doc_orientation_classify_model_dir=DOC_ORIENTATION_CLASSIFY_MODEL_DIR,
+        doc_unwarping_model_name=DOC_UNWARPING_MODEL_NAME,
+        doc_unwarping_model_dir=DOC_UNWARPING_MODEL_DIR,
+        textline_orientation_model_name=TEXTLINE_ORIENTATION_MODEL_NAME,
+        textline_orientation_model_dir=TEXTLINE_ORIENTATION_MODEL_DIR,
         seal_text_detection_model_name=SEAL_TEXT_DETECTION_MODEL_NAME,
         seal_text_detection_model_dir=SEAL_TEXT_DETECTION_MODEL_DIR,
+        seal_text_recognition_model_name=SEAL_TEXT_RECOGNITION_MODEL_NAME,
+        seal_text_recognition_model_dir=SEAL_TEXT_RECOGNITION_MODEL_DIR,
+        chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
+        chart_recognition_model_dir=CHART_RECOGNITION_MODEL_DIR,
+
+        # Top-level layout/det thresholds (single source of truth)
+        layout_threshold=LAYOUT_THRESHOLD,
+        layout_nms=LAYOUT_NMS,
+        layout_unclip_ratio=LAYOUT_UNCLIP_RATIO,
+        layout_merge_bboxes_mode=LAYOUT_MERGE_BBOXES_MODE,
+
+        text_det_limit_side_len=TEXT_DET_LIMIT_SIDE_LEN,
+        text_det_limit_type=TEXT_DET_LIMIT_TYPE,
+        text_det_thresh=TEXT_DET_THRESH,
+        text_det_box_thresh=TEXT_DET_BOX_THRESH,
+        text_det_unclip_ratio=TEXT_DET_UNCLIP_RATIO,
+
+        # Sole recognition filter
+        text_rec_score_thresh=TEXT_REC_SCORE_THRESH,
+
+        # Optional batch sizes
+        text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
+        textline_orientation_batch_size=TEXTLINE_ORIENTATION_BATCH_SIZE,
+        formula_recognition_batch_size=FORMULA_RECOGNITION_BATCH_SIZE,
+        chart_recognition_batch_size=CHART_RECOGNITION_BATCH_SIZE,
+        seal_text_recognition_batch_size=SEAL_TEXT_RECOGNITION_BATCH_SIZE,
+        seal_rec_score_thresh=SEAL_REC_SCORE_THRESH,
+
+        # Seal detection thresholds/limits (PP-StructureV3-only)
         seal_det_limit_side_len=SEAL_DET_LIMIT_SIDE_LEN,
         seal_det_limit_type=SEAL_DET_LIMIT_TYPE,
         seal_det_thresh=SEAL_DET_THRESH,
         seal_det_box_thresh=SEAL_DET_BOX_THRESH,
         seal_det_unclip_ratio=SEAL_DET_UNCLIP_RATIO,
-        seal_text_recognition_model_name=SEAL_TEXT_RECOGNITION_MODEL_NAME,
-        seal_text_recognition_model_dir=SEAL_TEXT_RECOGNITION_MODEL_DIR,
-        seal_text_recognition_batch_size=SEAL_TEXT_RECOGNITION_BATCH_SIZE,
-        seal_rec_score_thresh=SEAL_REC_SCORE_THRESH,
     )
     return {k: v for k, v in params.items() if v is not None}
 
@@ -207,10 +284,6 @@ def predict_collect_one(path: Path) -> Dict[str, Any]:
     if is_pdf and not USE_PDF_RASTERIZATION:
         outputs = pipeline.predict(str(path))
         for res in outputs:
-            if DEBUG_SAVE_ARTIFACTS:
-                with tempfile.TemporaryDirectory() as out_dir:
-                    res.save_to_json(save_path=str(out_dir))
-                    res.save_to_markdown(save_path=str(out_dir))
             md_info = getattr(res, "markdown", {}) or {}
             markdown_list.append(md_info)
             markdown_images_list.append(md_info.get("markdown_images", {}) or {})
@@ -233,10 +306,6 @@ def predict_collect_one(path: Path) -> Dict[str, Any]:
             for p in input_paths:
                 outputs = pipeline.predict(str(p))
                 for res in outputs:
-                    if DEBUG_SAVE_ARTIFACTS:
-                        with tempfile.TemporaryDirectory() as out_dir:
-                            res.save_to_json(save_path=str(out_dir))
-                            res.save_to_markdown(save_path=str(out_dir))
                     md_info = getattr(res, "markdown", {}) or {}
                     markdown_list.append(md_info)
                     markdown_images_list.append(md_info.get("markdown_images", {}) or {})
@@ -257,10 +326,6 @@ def predict_collect_one(path: Path) -> Dict[str, Any]:
     else:
         outputs = pipeline.predict(str(path))
         for res in outputs:
-            if DEBUG_SAVE_ARTIFACTS:
-                with tempfile.TemporaryDirectory() as out_dir:
-                    res.save_to_json(save_path=str(out_dir))
-                    res.save_to_markdown(save_path=str(out_dir))
             md_info = getattr(res, "markdown", {}) or {}
             markdown_list.append(md_info)
             markdown_images_list.append(md_info.get("markdown_images", {}) or {})
@@ -295,7 +360,7 @@ def health():
 @app.post("/parse")
 async def parse(
     files: List[UploadFile] = File(...),
-    output_format: Literal["json", "markdown", "both"] = Query("both"),
+    output_format: str = Query("both"),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
