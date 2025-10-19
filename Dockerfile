@@ -110,11 +110,25 @@ USE_FORMULA_RECOGNITION = False
 USE_CHART_RECOGNITION = False
 USE_SEAL_RECOGNITION = False
 
-# Minimal model names (rely on defaults where possible)
+# ==============================
+# Model names (all optional; use defaults if None)
+# ==============================
+
+# Core modules
 LAYOUT_DETECTION_MODEL_NAME = "PP-DocLayout-L"
 REGION_DETECTION_MODEL_NAME = None
 TEXT_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 TEXT_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
+
+# Table recognition family (optional granular control)
+TABLE_CLASSIFICATION_MODEL_NAME = None
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME = None
+WIRED_TABLE_CELLS_DET_MODEL_NAME = None
+WIRELESS_TABLE_CELLS_DET_MODEL_NAME = None
+TABLE_ORIENTATION_CLASSIFY_MODEL_NAME = None
+
+# Other optional modules
 FORMULA_RECOGNITION_MODEL_NAME = None
 DOC_ORIENTATION_CLASSIFY_MODEL_NAME = None
 DOC_UNWARPING_MODEL_NAME = None
@@ -123,11 +137,25 @@ SEAL_TEXT_DETECTION_MODEL_NAME = None
 SEAL_TEXT_RECOGNITION_MODEL_NAME = None
 CHART_RECOGNITION_MODEL_NAME = None
 
+# ==============================
 # Model dirs (None => default downloads)
+# ==============================
+
+# Core modules
 LAYOUT_DETECTION_MODEL_DIR = None
 REGION_DETECTION_MODEL_DIR = None
 TEXT_DETECTION_MODEL_DIR = None
 TEXT_RECOGNITION_MODEL_DIR = None
+
+# Table recognition family (optional granular control)
+TABLE_CLASSIFICATION_MODEL_DIR = None
+WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
+WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR = None
+WIRED_TABLE_CELLS_DET_MODEL_DIR = None
+WIRELESS_TABLE_CELLS_DET_MODEL_DIR = None
+TABLE_ORIENTATION_CLASSIFY_MODEL_DIR = None
+
+# Other optional modules
 FORMULA_RECOGNITION_MODEL_DIR = None
 DOC_ORIENTATION_CLASSIFY_MODEL_DIR = None
 DOC_UNWARPING_MODEL_DIR = None
@@ -252,7 +280,7 @@ def _build_init_kwargs() -> Dict[str, Any]:
         use_seal_recognition=USE_SEAL_RECOGNITION,
         use_region_detection=USE_REGION_DETECTION,
 
-        # Minimal model selections
+        # Core model selections
         layout_detection_model_name=LAYOUT_DETECTION_MODEL_NAME,
         layout_detection_model_dir=LAYOUT_DETECTION_MODEL_DIR,
         region_detection_model_name=REGION_DETECTION_MODEL_NAME,
@@ -263,32 +291,35 @@ def _build_init_kwargs() -> Dict[str, Any]:
         text_recognition_model_name=TEXT_RECOGNITION_MODEL_NAME,
         text_recognition_model_dir=TEXT_RECOGNITION_MODEL_DIR,
 
+        # Table recognition family (optional)
+        table_classification_model_name=TABLE_CLASSIFICATION_MODEL_NAME,
+        table_classification_model_dir=TABLE_CLASSIFICATION_MODEL_DIR,
+        wired_table_structure_recognition_model_name=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+        wired_table_structure_recognition_model_dir=WIRED_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR,
+        wireless_table_structure_recognition_model_name=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_NAME,
+        wireless_table_structure_recognition_model_dir=WIRELESS_TABLE_STRUCTURE_RECOGNITION_MODEL_DIR,
+        wired_table_cells_detection_model_name=WIRED_TABLE_CELLS_DET_MODEL_NAME,
+        wired_table_cells_detection_model_dir=WIRED_TABLE_CELLS_DET_MODEL_DIR,
+        wireless_table_cells_detection_model_name=WIRELESS_TABLE_CELLS_DET_MODEL_NAME,
+        wireless_table_cells_detection_model_dir=WIRELESS_TABLE_CELLS_DET_MODEL_DIR,
+        table_orientation_classify_model_name=TABLE_ORIENTATION_CLASSIFY_MODEL_NAME,
+        table_orientation_classify_model_dir=TABLE_ORIENTATION_CLASSIFY_MODEL_DIR,
+
+        # Other optional modules
         formula_recognition_model_name=FORMULA_RECOGNITION_MODEL_NAME,
         formula_recognition_model_dir=FORMULA_RECOGNITION_MODEL_DIR,
-
         doc_orientation_classify_model_name=DOC_ORIENTATION_CLASSIFY_MODEL_NAME,
         doc_orientation_classify_model_dir=DOC_ORIENTATION_CLASSIFY_MODEL_DIR,
         doc_unwarping_model_name=DOC_UNWARPING_MODEL_NAME,
         doc_unwarping_model_dir=DOC_UNWARPING_MODEL_DIR,
         textline_orientation_model_name=TEXTLINE_ORIENTATION_MODEL_NAME,
         textline_orientation_model_dir=TEXTLINE_ORIENTATION_MODEL_DIR,
-
         seal_text_detection_model_name=SEAL_TEXT_DETECTION_MODEL_NAME,
         seal_text_detection_model_dir=SEAL_TEXT_DETECTION_MODEL_DIR,
-        seal_det_limit_side_len=SEAL_DET_LIMIT_SIDE_LEN,
-        seal_det_limit_type=SEAL_DET_LIMIT_TYPE,
-        seal_det_thresh=SEAL_DET_THRESH,
-        seal_det_box_thresh=SEAL_DET_BOX_THRESH,
-        seal_det_unclip_ratio=SEAL_DET_UNCLIP_RATIO,
-
         seal_text_recognition_model_name=SEAL_TEXT_RECOGNITION_MODEL_NAME,
         seal_text_recognition_model_dir=SEAL_TEXT_RECOGNITION_MODEL_DIR,
-        seal_text_recognition_batch_size=SEAL_TEXT_RECOGNITION_BATCH_SIZE,
-        seal_rec_score_thresh=SEAL_REC_SCORE_THRESH,
-
         chart_recognition_model_name=CHART_RECOGNITION_MODEL_NAME,
         chart_recognition_model_dir=CHART_RECOGNITION_MODEL_DIR,
-        chart_recognition_batch_size=CHART_RECOGNITION_BATCH_SIZE,
 
         # Redundant compatibility (fallback if a build reads top-level)
         layout_threshold=LAYOUT_THRESHOLD,
@@ -309,6 +340,9 @@ def _build_init_kwargs() -> Dict[str, Any]:
         text_recognition_batch_size=TEXT_RECOGNITION_BATCH_SIZE,
         textline_orientation_batch_size=TEXTLINE_ORIENTATION_BATCH_SIZE,
         formula_recognition_batch_size=FORMULA_RECOGNITION_BATCH_SIZE,
+        chart_recognition_batch_size=CHART_RECOGNITION_BATCH_SIZE,
+        seal_text_recognition_batch_size=SEAL_TEXT_RECOGNITION_BATCH_SIZE,
+        seal_rec_score_thresh=SEAL_REC_SCORE_THRESH,
     )
     return {k: v for k, v in params.items() if v is not None}
 
